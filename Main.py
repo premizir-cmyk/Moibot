@@ -7,28 +7,32 @@ import json
 import os
 from datetime import datetime
 
+# --- ОСНОВНЫЕ НАСТРОЙКИ ПОД ТВОЙ КАНАЛ И БОТА ---
 TOKEN = '8282256956:AAH-LPJFnh8HYnMHuP8-R1uQGTQ2P-_-pYk'
 CHANNEL_ID = '@otzovzaden'
-BOT_USERNAME = 'Dengaotziv_bot'
-MY_USERNAME = '@premizir' # Твой юзернейм для связи
+BOT_USERNAME = '@Dengaotziv_bot'
+MY_USERNAME = '@premizir'  # Твой юзернейм для связи
 
-OWNER_ID = 7605961809
+OWNER_ID = [7605961809]  # Твой ID владельца
 
 bot = telebot.TeleBot(TOKEN)
-DB_FILE = 'users.json'
-COOLDOWN_FILE = 'cooldowns.json'
-NOTIFIED_FILE = 'notified.json'
-HISTORY_FILE = 'history.json'
-POSTS_FILE = 'active_posts.json'
 
-COOLDOWN_TIME = 9000  # 2.5 часа (9000 сек)
-AUTO_CLOSE_TIME = 7200  # 2 часа (7200 сек)
+# --- НАСТРОЙКА ХРАНЕНИЯ ФАЙЛОВ НА BOTHOST ---
+DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
+DB_FILE = os.path.join(DATA_DIR, 'users.json')
+COOLDOWN_FILE = os.path.join(DATA_DIR, 'cooldowns.json')
+NOTIFIED_FILE = os.path.join(DATA_DIR, 'notified.json')
+HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
+POSTS_FILE = os.path.join(DATA_DIR, 'active_posts.json')
 
-# ЧИСТЫЙ ШАБЛОН
+COOLDOWN_TIME = 9000    # 2.5 часа кулдаун между постами (в секундах)
+AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
+
+# --- ШАБЛОНЫ И ПРАВИЛА ---
 TEMPLATE_TEXT = """🔥ГОРЯЧИЙ СЛОТ
 
-❣️ Площадка:
-💵 Оплата:
+❣️ Площадка: 
+💵 Оплата: 
 😀 Что нужно делать, От себя: """
 
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
@@ -38,6 +42,8 @@ RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 3. **Запрещено:** Скамерство, спам, флуд.
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def load_data(filename):
     if os.path.exists(filename):
@@ -57,7 +63,7 @@ def save_data(filename, data):
         print(f"Ошибка сохранения {filename}: {e}")
 
 def is_owner(user_id):
-    return user_id == OWNER_ID
+    return user_id in OWNER_ID
 
 def is_user_active(user_id):
     if is_owner(user_id):
@@ -103,18 +109,18 @@ def save_to_history(user_id, username, text):
     history = load_data(HISTORY_FILE)
     if not isinstance(history, list):
         history = []
-
+    
     post_entry = {
         "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
         "user_id": user_id,
         "username": username or "Без username",
         "text": text[:300]
     }
-
+    
     history.append(post_entry)
     if len(history) > 50:
         history = history[-50:]
-
+        
     save_data(HISTORY_FILE, history)
 
 def format_time(seconds):
@@ -125,9 +131,10 @@ def format_time(seconds):
     else:
         return f"{minutes} мин."
 
-def close_post_in_channel(message_id, original_text=None, reason=None):
-    """Полное стирание информации и замена на плашку закрытия с рекламой бота"""
+# --- ЛОГИКА ЗАКРЫТИЯ ПОСТА В КАНАЛЕ ---
 
+def close_post_in_channel(message_id, original_text=None, reason=None):
+    """Стирает информацию и меняет её на плашку закрытия"""
     CLOSED_CARD = (
         "🔒 **[СЛОТ ЗАКРЫТ]**\n\n"
         "━━━━━⬍━━━━━\n"
@@ -137,7 +144,7 @@ def close_post_in_channel(message_id, original_text=None, reason=None):
     )
 
     try:
-        # Пробуем заменить текст (для текстовых постов)
+        # Для текстовых постов
         bot.edit_message_text(
             text=CLOSED_CARD,
             chat_id=CHANNEL_ID,
@@ -147,7 +154,7 @@ def close_post_in_channel(message_id, original_text=None, reason=None):
         )
         return True
     except Exception:
-        # Для постов с картинкой/видео: удаляем и отправляем чистую карточку
+        # Для медиафайлов (картинок/видео): удаляем и шлем заглушку
         try:
             bot.delete_message(chat_id=CHANNEL_ID, message_id=message_id)
             bot.send_message(
@@ -158,8 +165,6 @@ def close_post_in_channel(message_id, original_text=None, reason=None):
             return True
         except Exception as e:
             print(f"Ошибка при удалении/очистке поста {message_id}: {e}")
-
-            # Резервный вариант
             try:
                 bot.edit_message_caption(
                     caption=CLOSED_CARD,
@@ -172,14 +177,16 @@ def close_post_in_channel(message_id, original_text=None, reason=None):
             except:
                 return False
 
-# ЕДИНЫЙ ФОНОВЫЙ ПОТОК ПРОВЕРКИ АВТОЗАКРЫТИЯ
+# --- ФОНОВЫЕ ПОТОКИ ---
+
 def auto_close_checker():
+    """Проверка и закрытие постов спустя AUTO_CLOSE_TIME"""
     while True:
         try:
             posts_data = load_data(POSTS_FILE)
             now = time.time()
             changed = False
-
+            
             for p_id, p_info in list(posts_data.items()):
                 created_at = p_info.get("created_at", 0)
                 if now - created_at >= AUTO_CLOSE_TIME:
@@ -187,28 +194,29 @@ def auto_close_checker():
                     close_post_in_channel(msg_id)
                     del posts_data[p_id]
                     changed = True
-
+                    
             if changed:
                 save_data(POSTS_FILE, posts_data)
-
+                
         except Exception as e:
             print(f"Ошибка автозакрытия: {e}")
-
+            
         time.sleep(30)
 
 def check_expiring_subscriptions():
+    """Проверка окончания подписок пользователей за 24 часа"""
     while True:
         try:
             users = load_data(DB_FILE)
             notified = load_data(NOTIFIED_FILE)
             now = time.time()
-
+            
             for u_id, exp_time in list(users.items()):
                 time_left = exp_time - now
                 if 0 < time_left <= 86400 and u_id not in notified:
                     try:
                         bot.send_message(
-                            int(u_id),
+                            int(u_id), 
                             "⚠️ **Внимание!** Ваша подписка закончится через 24 часа."
                         )
                         notified[u_id] = True
@@ -221,10 +229,10 @@ def check_expiring_subscriptions():
                         print(f"Ошибка предупреждения {u_id}: {e}")
         except Exception as e:
             print(f"Ошибка проверки подписок: {e}")
-
+            
         time.sleep(3600)
 
-# ================= ГЛАВНОЕ МЕНЮ И КНОПКИ =================
+# --- КЛАВИАТУРЫ И МЕНЮ ---
 
 def get_main_menu_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -233,9 +241,8 @@ def get_main_menu_keyboard(user_id):
         types.InlineKeyboardButton(text="📖 Правила", callback_data="show_rules"),
         types.InlineKeyboardButton(text="⏳ Мой профиль / КД", callback_data="my_profile")
     )
-    # Кнопка связи с тобой для покупки бота
-    markup.add(types.InlineKeyboardButton(text="🤖 Хочу такого же бота себе", url=f"https://t.me/premizir"))
-
+    markup.add(types.InlineKeyboardButton(text="🤖 Хочу такого же бота себе", url=f"https://t.me/{MY_USERNAME.replace('@', '')}"))
+    
     if is_owner(user_id):
         markup.add(types.InlineKeyboardButton(text="🛠 Админ-панель", callback_data="open_admin_help"))
     return markup
@@ -255,7 +262,7 @@ def get_admin_help_text():
         "📜 `/history` — Посмотреть последние посты\n"
     )
 
-# ================= КОМАНДЫ ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА =================
+# --- АДМИН-КОМАНДЫ ---
 
 @bot.message_handler(commands=['adminhelp'])
 def admin_help_cmd(message):
@@ -274,7 +281,7 @@ def add_user(message):
         users = load_data(DB_FILE)
         users[target_id] = time.time() + (days * 86400)
         save_data(DB_FILE, users)
-
+        
         notified = load_data(NOTIFIED_FILE)
         if target_id in notified:
             del notified[target_id]
@@ -348,21 +355,21 @@ def show_history(message):
         text += f"🕒 [{item['timestamp']}] {user_str}\n💬 {item['text'][:80]}...\n---\n"
     bot.reply_to(message, text)
 
-# ================= КОМАНДА ЗАКРЫТИЯ ПОСТА ВРУЧНУЮ =================
+# --- РУЧНОЕ ЗАКРЫТИЕ ПОСТА ---
 
 @bot.message_handler(commands=['close'])
 def close_user_post(message):
     user_id = message.from_user.id
     posts_data = load_data(POSTS_FILE)
-
+    
     target_post_id = None
-
+    
     if message.reply_to_message:
         for p_id, p_info in posts_data.items():
             if p_info.get("confirm_msg_id") == message.reply_to_message.message_id:
                 target_post_id = p_id
                 break
-
+                
     if not target_post_id:
         args = message.text.split()
         if len(args) > 1 and args[1].isdigit():
@@ -396,7 +403,7 @@ def close_user_post(message):
             bot.reply_to(message, "✅ **Пост успешно закрыт!**\n⚡ Кулдаун сброшен!")
         else:
             bot.reply_to(message, "✅ **Пост успешно закрыт!**")
-
+            
     else:
         if is_owner(user_id):
             res = close_post_in_channel(int(target_post_id))
@@ -407,12 +414,12 @@ def close_user_post(message):
         else:
             bot.reply_to(message, "❌ Пост не найден в списке активных.")
 
-# ================= ОБРАБОТКА CALLBACKS =================
+# --- ОБРАБОТКА CALLBACK-КНОПОК ---
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     user_id = call.from_user.id
-
+    
     if call.data == "main_menu":
         bot.answer_callback_query(call.id)
         bot.edit_message_text(
@@ -474,7 +481,7 @@ def callback_handler(call):
                 reply_markup=get_back_keyboard()
             )
 
-# ================= ОБРАБОТКА СТАРТА =================
+# --- ОБРАБОТКА СТАРТА ---
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -482,18 +489,18 @@ def send_welcome(message):
 
     if is_user_active(user_id):
         bot.reply_to(
-            message,
-            "👋 Привет! Добро пожаловать в бот автопубликаций.\nВыберите нужный раздел ниже:",
+            message, 
+            "👋 Привет! Добро пожаловать в бот автопубликаций.\nВыберите нужный раздел ниже:", 
             reply_markup=get_main_menu_keyboard(user_id)
         )
     else:
         bot.reply_to(
-            message,
-            f"⛔ У вас нет доступа к публикации.\nВаш Telegram ID: `{user_id}`\n\nДля покупки доступа напишите администратору.",
+            message, 
+            f"⛔ У вас нет доступа к публикации.\nВаш Telegram ID: `{user_id}`\n\nДля покупки доступа напишите администратору.", 
             parse_mode="Markdown"
         )
 
-# ================= ОБРАБОТКА И ПУБЛИКАЦИЯ ПОСТОВ =================
+# --- ПУБЛИКАЦИЯ ПОСТОВ ---
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'animation'])
 def handle_post(message):
@@ -501,7 +508,7 @@ def handle_post(message):
         return
 
     user_id = message.from_user.id
-
+    
     if not is_user_active(user_id):
         bot.reply_to(message, f"⛔ Публикация отклонена. Подписка истекла или не куплена.\nВаш ID: `{user_id}`", parse_mode="Markdown")
         return
@@ -513,16 +520,16 @@ def handle_post(message):
         return
 
     post_text = message.text or message.caption or ""
-
+    
     has_forbidden = "Писать строго сюда" in post_text
     has_required = ("🔥ГОРЯЧИЙ СЛОТ" in post_text) and ("Площадка:" in post_text) and ("Оплата:" in post_text)
 
     if has_forbidden or not has_required:
         bot.reply_to(
-            message,
+            message, 
             "❌ **Неправильный шаблон!**\n\n"
             "⚠️ *Убедитесь, что вы НЕ используете устаревшую строку 'Писать строго сюда'.*\n\n"
-            "👇 **Скопируйте актуальный чистый шаблон ниже:**\n\n" + f"<code>{TEMPLATE_TEXT}</code>",
+            "👇 **Скопируйте актуальный чистый шаблон ниже:**\n\n" + f"<code>{TEMPLATE_TEXT}</code>", 
             parse_mode="HTML"
         )
         return
@@ -537,10 +544,10 @@ def handle_post(message):
             from_chat_id=message.chat.id,
             message_id=message.message_id
         )
-
+        
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=author_link))
-
+        
         bot.edit_message_reply_markup(
             chat_id=CHANNEL_ID,
             message_id=published_msg.message_id,
@@ -549,13 +556,13 @@ def handle_post(message):
 
         set_cooldown(user_id)
         save_to_history(user_id, username, post_text)
-
+        
         confirm_msg = bot.reply_to(
-            message,
+            message, 
             "🚀 **Пост успешно выложен в канал!**\n\n"
             "📌 **Как закрыть пост:**\n"
             "Ответьте командой `/close` прямо на это сообщение.\n\n"
-            "⏱ *Если вы закроете пост в течение 1 минуты — кулдаун сбросится!*",
+            "⏱ *Если вы закроете пост в течение 1 минуты — кулдаун сброситcя!*",
             parse_mode="Markdown"
         )
 
@@ -568,26 +575,29 @@ def handle_post(message):
         }
         save_data(POSTS_FILE, posts_data)
 
+        # Отправка логов владельцу
         if not is_owner(user_id):
             user_tag = f"@{username}" if username else f"ID {user_id}"
             admin_log = f"📩 **Новый пост в канале!**\n👤 Автор: {user_tag}\n📝 Текст:\n{post_text}"
-            try:
-                bot.send_message(OWNER_ID, admin_log, parse_mode="Markdown")
-            except:
-                pass
+            for admin_id in OWNER_ID:
+                try:
+                    bot.send_message(admin_id, admin_log, parse_mode="Markdown")
+                except:
+                    pass
 
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка публикации: {e}")
 
-# Запуск фоновых процессов
+# --- ЗАПУСК ПОТОКОВ И ПОЛЛИНГА ---
+
 threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions, daemon=True).start()
 
-while True:
-    try:
-        print("Бот запущен и готов к работе...")
-        bot.polling(none_stop=True, timeout=20, long_polling_timeout=20, skip_pending=True)
-    except Exception as e:
-        print(f"Ошибка сети: {e}. Переподключение...")
-        time.sleep(3)
-
+if __name__ == '__main__':
+    while True:
+        try:
+            print("Бот запущен и готов к работе...")
+            bot.polling(none_stop=True, timeout=20, long_polling_timeout=20, skip_pending=True)
+        except Exception as e:
+            print(f"Ошибка сети: {e}. Переподключение...")
+            time.sleep(3)
