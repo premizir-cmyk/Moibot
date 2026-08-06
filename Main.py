@@ -84,7 +84,7 @@ def check_channel_subscription(user_id):
         member = bot.get_chat_member(CHANNEL_ID, user_id)
         return member.status in ['creator', 'administrator', 'member']
     except Exception:
-        return True  # В случае ошибки API пропускаем
+        return True
 
 def is_user_active(user_id):
     if is_owner(user_id):
@@ -98,7 +98,7 @@ def is_user_active(user_id):
             posts_left = data.get("posts", 0)
             if (exp_time > 0 and time.time() < exp_time) or posts_left > 0:
                 return True
-        elif isinstance(data, (int, float)):  # Поддержка старого формата баз
+        elif isinstance(data, (int, float)):
             if time.time() < data:
                 return True
             else:
@@ -107,7 +107,6 @@ def is_user_active(user_id):
     return False
 
 def consume_post_credit(user_id):
-    """Списывает 1 пост, если у пользователя поштучная оплата"""
     if is_owner(user_id):
         return
     users = load_data(DB_FILE)
@@ -136,7 +135,6 @@ def set_cooldown(user_id):
     cooldowns[str(user_id)] = time.time()
     save_data(COOLDOWN_FILE, cooldowns)
     
-    # Сбрасываем флаг уведомления о выходе из КД
     cd_notified = load_data(CD_NOTIFIED_FILE)
     if str(user_id) in cd_notified:
         del cd_notified[str(user_id)]
@@ -187,7 +185,6 @@ def validate_template_strict(text):
     if "@" in clean_text or "t.me" in clean_text.lower() or "telegram.me" in clean_text.lower() or "http" in clean_text.lower():
         return False, "Запрещено указывать юзернеймы (@) или ссылки в тексте поста!"
 
-    # Антискам проверка
     for word in FORBIDDEN_WORDS:
         if word in clean_text.lower():
             return False, f"Текст содержит запрещенное слово/тематику ({word})!"
@@ -273,7 +270,6 @@ def auto_close_checker():
         time.sleep(15)
 
 def check_expiring_subscriptions_and_cooldowns():
-    """Проверка подписок и отправка уведомления при выходе из КД"""
     while True:
         try:
             users = load_data(DB_FILE)
@@ -282,7 +278,6 @@ def check_expiring_subscriptions_and_cooldowns():
             cd_notified = load_data(CD_NOTIFIED_FILE)
             now = time.time()
             
-            # 1. Проверка закінчення подписки
             for u_id, u_info in list(users.items()):
                 exp_time = u_info.get("expire", 0) if isinstance(u_info, dict) else u_info
                 time_left = exp_time - now
@@ -299,7 +294,6 @@ def check_expiring_subscriptions_and_cooldowns():
                         notified[u_id] = True
                         save_data(NOTIFIED_FILE, notified)
 
-            # 2. Уведомление об окончании кулдауна
             for u_id, last_time in list(cooldowns.items()):
                 if now - last_time >= COOLDOWN_TIME and u_id not in cd_notified:
                     try:
@@ -320,7 +314,14 @@ def check_expiring_subscriptions_and_cooldowns():
 
 # --- КЛАВИАТУРЫ И МЕНЮ ---
 
+def get_persistent_keyboard():
+    """Постоянная нижняя клавиатура, которая всегда под рукой"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("📱 Главное меню"))
+    return markup
+
 def get_main_menu_keyboard(user_id):
+    """Инлайн-меню внутри чата"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(text="📋 Шаблон поста", callback_data="get_template"),
@@ -391,7 +392,7 @@ def add_user(message):
 
         bot.reply_to(message, msg_text, parse_mode="Markdown")
         try:
-            bot.send_message(int(target_id), f"🎉 **Вам обновлен доступ к боту!**\n\n{msg_text}\n\nНажмите /start для начала.")
+            bot.send_message(int(target_id), f"🎉 **Вам обновлен доступ к боту!**\n\n{msg_text}\n\nНажмите /start для начала.", reply_markup=get_persistent_keyboard())
         except:
             pass
     except Exception:
@@ -425,7 +426,6 @@ def user_info_cmd(message):
         if arg.isdigit() and arg in users:
             target_id = arg
         else:
-            # Поиск по юзернейму в истории
             history = load_data(HISTORY_FILE)
             for h in reversed(history):
                 if h.get('username', '').lower() == arg.lower():
@@ -706,7 +706,24 @@ def callback_handler(call):
                 reply_markup=get_back_keyboard()
             )
 
-# --- ОБРАБОТКА СТАРТА ---
+# --- ОБРАБОТКА СТАРТА И КНОПКИ МЕНЮ НА КЛАВИАТУРЕ ---
+
+@bot.message_handler(func=lambda msg: msg.text == "📱 Главное меню")
+def handle_menu_button(message):
+    user_id = message.from_user.id
+    if is_user_active(user_id):
+        bot.send_message(
+            message.chat.id,
+            "👋 Привет! Добро пожаловать в бот автопубликаций.\nВыберите нужный раздел ниже:",
+            reply_markup=get_main_menu_keyboard(user_id)
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            f"⛔ У вас нет доступа к публикации.\nВаш Telegram ID: `{user_id}`\n\nДля покупки доступа напишите администратору.",
+            parse_mode="Markdown",
+            reply_markup=get_persistent_keyboard()
+        )
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -718,11 +735,14 @@ def send_welcome(message):
             "👋 Привет! Добро пожаловать в бот автопубликаций.\nВыберите нужный раздел ниже:", 
             reply_markup=get_main_menu_keyboard(user_id)
         )
+        # Отправляем сообщение с нижней клавиатурой, чтобы зафиксировать её
+        bot.send_message(message.chat.id, "Кнопка «📱 Главное меню» добавлена на вашу клавиатуру снизу.", reply_markup=get_persistent_keyboard())
     else:
         bot.reply_to(
             message, 
             f"⛔ У вас нет доступа к публикации.\nВаш Telegram ID: `{user_id}`\n\nДля покупки доступа напишите администратору.", 
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=get_persistent_keyboard()
         )
 
 # --- ПУБЛИКАЦИЯ ПОСТОВ ---
@@ -738,21 +758,31 @@ def handle_post(message):
     if not check_channel_subscription(user_id):
         bot.reply_to(
             message, 
-            f"❌ **Для использования бота вы должны быть подписаны на наш канал {CHANNEL_ID}!**\n Подпишитесь и отправьте пост снова.",
-            parse_mode="Markdown"
+            f"❌ **Для использования бота вы должны быть подписаны на наш канал {CHANNEL_ID}!**\nПодпишитесь и отправьте пост снова.",
+            parse_mode="Markdown",
+            reply_markup=get_persistent_keyboard()
         )
         return
 
     # 2. Проверка активности профиля
     if not is_user_active(user_id):
-        bot.reply_to(message, f"⛔ Публикация отклонена. Подписка истекла или закончились посты.\nВаш ID: `{user_id}`", parse_mode="Markdown")
+        bot.reply_to(
+            message, 
+            f"⛔ Публикация отклонена. Подписка истекла или закончились посты.\nВаш ID: `{user_id}`", 
+            parse_mode="Markdown",
+            reply_markup=get_persistent_keyboard()
+        )
         return
 
     # 3. Проверка кулдауна
     cooldown_left = get_cooldown_left(user_id)
     if cooldown_left > 0:
         time_str = format_time(cooldown_left)
-        bot.reply_to(message, f"⏳ **Кулдаун!**\nВы сможете опубликовать следующий пост через **{time_str}**.")
+        bot.reply_to(
+            message, 
+            f"⏳ **Кулдаун!**\nВы сможете опубликовать следующий пост через **{time_str}**.",
+            reply_markup=get_persistent_keyboard()
+        )
         return
 
     post_text = message.text or message.caption or ""
@@ -765,7 +795,8 @@ def handle_post(message):
             f"❌ **Ошибка публикации!**\n\n"
             f"⚠️ *Причина:* {err_reason}\n\n"
             "👇 **Скопируйте чистый шаблон:**\n\n" + f"<code>{TEMPLATE_TEXT}</code>", 
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_persistent_keyboard()
         )
         return
 
@@ -789,9 +820,7 @@ def handle_post(message):
             reply_markup=markup
         )
 
-        # Списание разового поста (если доступ поштучный)
         consume_post_credit(user_id)
-
         set_cooldown(user_id)
         save_to_history(user_id, username, post_text)
         
@@ -801,7 +830,8 @@ def handle_post(message):
             "📌 **Как закрыть пост:**\n"
             "Ответьте командой `/close` прямо на это сообщение.\n\n"
             "⏱ *Если вы закроете пост в течение 1 минуты — кулдаун сброситcя!*",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=get_persistent_keyboard()
         )
 
         posts_data = load_data(POSTS_FILE)
@@ -813,7 +843,6 @@ def handle_post(message):
         }
         save_data(POSTS_FILE, posts_data)
 
-        # Отправка логов владельцу
         if not is_owner(user_id):
             user_tag = f"@{username}" if username else f"ID {user_id}"
             admin_log = f"📩 **Новый пост в канале!**\n👤 Автор: {user_tag}\n📝 Текст:\n{post_text}"
@@ -824,7 +853,7 @@ def handle_post(message):
                     pass
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка публикации: {e}")
+        bot.reply_to(message, f"❌ Ошибка публикации: {e}", reply_markup=get_persistent_keyboard())
 
 # --- ЗАПУСК ПОТОКОВ И ПОЛЛИНГА ---
 
