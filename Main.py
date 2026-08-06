@@ -30,8 +30,22 @@ CD_NOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_notified.json')
 COOLDOWN_TIME = 9000    # 2.5 часа кулдаун между постами (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
 
-# Список запрещенных скам-слов
-FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом']
+# Расширенный список запрещенных скам-слов
+FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом', 'пробив', 'софт']
+
+# Ключевые слова, указывающие на РЕАЛЬНОЕ задание / слот
+TASK_KEYWORDS = [
+    # Отзывы и карты
+    'отзыв', 'оценка', 'звезд', 'звёзд', 'карты', 'яндекс', 'гугл', 'авито', '2гис', 'профиль',
+    # Пушкинская карта и билеты
+    'пушкинск', 'пушка', 'билет', 'мероприятие', 'баланс',
+    # Маркетплейсы и выкупы
+    'wb', 'wildberries', 'вайлдберриз', 'озон', 'ozon', 'мегамаркет', 'выкуп', 'избранное', 'товар',
+    # Задания и действия
+    'написать', 'оформить', 'скачать', 'подписка', 'регистрация', 'рег', 'пройти', 'прогрев',
+    # Аккаунты и сервисы
+    'аккаунт', 'акк', 'номер', 'смс', 'приложение', 'промокод'
+]
 
 # Потокобезопасность для работы с JSON
 file_lock = threading.Lock()
@@ -196,8 +210,23 @@ def validate_template_strict(text):
         return False, "Нарушена структура шаблона или добавлен лишний текст снаружи шаблона."
         
     platform, payment, description = match.groups()
-    if not platform.strip() or not payment.strip() or not description.strip():
+    p_clean = platform.strip()
+    pay_clean = payment.strip()
+    desc_clean = description.strip()
+
+    if not p_clean or not pay_clean or not desc_clean:
         return False, "Все поля шаблона должны быть заполнены!"
+
+    # --- ПРОВЕРКА НА МУСОР И БРЕД ---
+    if len(desc_clean) < 8:
+        return False, "Описание задания слишком короткое. Напишите подробнее, что нужно сделать."
+
+    desc_lower = desc_clean.lower()
+    platform_lower = p_clean.lower()
+    
+    has_keyword = any(kw in desc_lower or kw in platform_lower for kw in TASK_KEYWORDS)
+    if not has_keyword:
+        return False, "Непонятное задание. Укажите конкретную суть (например: написать отзыв, Пушкинская карта, выкуп WB и т.д.)."
 
     return True, "OK"
 
@@ -315,13 +344,13 @@ def check_expiring_subscriptions_and_cooldowns():
 # --- КЛАВИАТУРЫ И МЕНЮ ---
 
 def get_persistent_keyboard():
-    """Постоянная нижняя клавиатура, которая всегда под рукой"""
+    """Постоянная нижняя клавиатура"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("📱 Главное меню"))
     return markup
 
 def get_main_menu_keyboard(user_id):
-    """Инлайн-меню внутри чата"""
+    """Инлайн-меню в чате"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(text="📋 Шаблон поста", callback_data="get_template"),
@@ -452,7 +481,7 @@ def user_info_cmd(message):
             f"• Кулдаун: **{format_time(cd_left) if cd_left > 0 else 'Нет'}**"
         )
         bot.reply_to(message, text, parse_mode="Markdown")
-    except Exception as e:
+    except Exception:
         bot.reply_to(message, "❌ Формат: `/user ID` или `/user @username`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['stats'])
@@ -735,8 +764,7 @@ def send_welcome(message):
             "👋 Привет! Добро пожаловать в бот автопубликаций.\nВыберите нужный раздел ниже:", 
             reply_markup=get_main_menu_keyboard(user_id)
         )
-        # Отправляем сообщение с нижней клавиатурой, чтобы зафиксировать её
-        bot.send_message(message.chat.id, "Кнопка «📱 Главное меню» добавлена на вашу клавиатуру снизу.", reply_markup=get_persistent_keyboard())
+        bot.send_message(message.chat.id, "Кнопка «📱 Главное меню» закреплена внизу на клавиатуре.", reply_markup=get_persistent_keyboard())
     else:
         bot.reply_to(
             message, 
@@ -787,7 +815,7 @@ def handle_post(message):
 
     post_text = message.text or message.caption or ""
 
-    # 4. Проверка шаблона и антискам
+    # 4. Проверка шаблона, антискама и смысла задания
     is_valid, err_reason = validate_template_strict(post_text)
     if not is_valid:
         bot.reply_to(
@@ -824,6 +852,10 @@ def handle_post(message):
         set_cooldown(user_id)
         save_to_history(user_id, username, post_text)
         
+        # Кнопка возврата в меню под подтверждением
+        confirm_markup = types.InlineKeyboardMarkup()
+        confirm_markup.add(types.InlineKeyboardButton(text="📱 Главное меню", callback_data="main_menu"))
+
         confirm_msg = bot.reply_to(
             message, 
             "🚀 **Пост успешно выложен в канал!**\n\n"
@@ -831,7 +863,7 @@ def handle_post(message):
             "Ответьте командой `/close` прямо на это сообщение.\n\n"
             "⏱ *Если вы закроете пост в течение 1 минуты — кулдаун сброситcя!*",
             parse_mode="Markdown",
-            reply_markup=get_persistent_keyboard()
+            reply_markup=confirm_markup
         )
 
         posts_data = load_data(POSTS_FILE)
@@ -861,7 +893,7 @@ threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions_and_cooldowns, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен и готов к высокими нагрузкам...")
+    print("Бот запущен и готов к работе...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
