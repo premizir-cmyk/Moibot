@@ -5,6 +5,7 @@ import threading
 import time
 import json
 import os
+import re
 from datetime import datetime
 
 # --- ОСНОВНЫЕ НАСТРОЙКИ ПОД ТВОЙ КАНАЛ И БОТА ---
@@ -15,7 +16,7 @@ MY_USERNAME = '@premizir'  # Твой юзернейм для связи
 
 OWNER_ID = [7605961809]  # Твой ID владельца
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=16)
 
 # --- НАСТРОЙКА ХРАНЕНИЯ ФАЙЛОВ НА BOTHOST ---
 DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
@@ -28,6 +29,9 @@ POSTS_FILE = os.path.join(DATA_DIR, 'active_posts.json')
 COOLDOWN_TIME = 9000    # 2.5 часа кулдаун между постами (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
 
+# Потокобезопасность для работы с JSON
+file_lock = threading.Lock()
+
 # --- ШАБЛОНЫ И ПРАВИЛА ---
 TEMPLATE_TEXT = """🔥ГОРЯЧИЙ СЛОТ
 
@@ -37,30 +41,32 @@ TEMPLATE_TEXT = """🔥ГОРЯЧИЙ СЛОТ
 
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
-1. **Строго по шаблону!** Бот проверяет ключевые слова.
+1. **Строго по шаблону!** Любой сторонний текст до или после шаблона запрещен.
 2. **Кулдаун:** Между постами 2 часа 30 минут.
-3. **Запрещено:** Скамерство, спам, флуд.
+3. **Запрещено:** Скамерство, спам, флуд, сторонние ссылки.
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def load_data(filename):
-    if os.path.exists(filename):
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Ошибка чтения {filename}: {e}")
-            return {} if not filename.endswith('history.json') else []
-    return {} if not filename.endswith('history.json') else []
+    with file_lock:
+        if os.path.exists(filename):
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Ошибка чтения {filename}: {e}")
+                return {} if not filename.endswith('history.json') else []
+        return {} if not filename.endswith('history.json') else []
 
 def save_data(filename, data):
-    try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-    except Exception as e:
-        print(f"Ошибка сохранения {filename}: {e}")
+    with file_lock:
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Ошибка сохранения {filename}: {e}")
 
 def is_owner(user_id):
     return user_id in OWNER_ID
@@ -131,10 +137,37 @@ def format_time(seconds):
     else:
         return f"{minutes} мин."
 
+def validate_template_strict(text):
+    """
+    Жесткая проверка структуры шаблона.
+    Текст должен строго начинаться с 🔥ГОРЯЧИЙ СЛОТ и не содержать стороннего мусора.
+    """
+    if not text:
+        return False
+    
+    clean_text = text.strip()
+
+    # Запрещаем старые строки
+    if "Писать строго сюда" in clean_text:
+        return False
+
+    # Строгое регулярное выражение под структуру
+    pattern = r"^🔥ГОРЯЧИЙ СЛОТ\s+❣️ Площадка:\s*(.+?)\s+💵 Оплата:\s*(.+?)\s+😀 Что нужно делать, От себя:\s*(.+)$"
+    
+    match = re.match(pattern, clean_text, re.DOTALL)
+    if not match:
+        return False
+        
+    # Проверяем, что поля не пустые
+    platform, payment, description = match.groups()
+    if not platform.strip() or not payment.strip() or not description.strip():
+        return False
+
+    return True
+
 # --- ЛОГИКА ЗАКРЫТИЯ ПОСТА В КАНАЛЕ ---
 
-def close_post_in_channel(message_id, original_text=None, reason=None):
-    """Стирает информацию и меняет её на плашку закрытия"""
+def close_post_in_channel(message_id):
     CLOSED_CARD = (
         "🔒 **[СЛОТ ЗАКРЫТ]**\n\n"
         "━━━━━⬍━━━━━\n"
@@ -144,7 +177,6 @@ def close_post_in_channel(message_id, original_text=None, reason=None):
     )
 
     try:
-        # Для текстовых постов
         bot.edit_message_text(
             text=CLOSED_CARD,
             chat_id=CHANNEL_ID,
@@ -154,7 +186,6 @@ def close_post_in_channel(message_id, original_text=None, reason=None):
         )
         return True
     except Exception:
-        # Для медиафайлов (картинок/видео): удаляем и шлем заглушку
         try:
             bot.delete_message(chat_id=CHANNEL_ID, message_id=message_id)
             bot.send_message(
@@ -180,7 +211,6 @@ def close_post_in_channel(message_id, original_text=None, reason=None):
 # --- ФОНОВЫЕ ПОТОКИ ---
 
 def auto_close_checker():
-    """Проверка и закрытие постов спустя AUTO_CLOSE_TIME"""
     while True:
         try:
             posts_data = load_data(POSTS_FILE)
@@ -201,10 +231,9 @@ def auto_close_checker():
         except Exception as e:
             print(f"Ошибка автозакрытия: {e}")
             
-        time.sleep(30)
+        time.sleep(15)
 
 def check_expiring_subscriptions():
-    """Проверка окончания подписок пользователей за 24 часа"""
     while True:
         try:
             users = load_data(DB_FILE)
@@ -500,7 +529,7 @@ def send_welcome(message):
             parse_mode="Markdown"
         )
 
-# --- ПУБЛИКАЦИЯ ПОСТОВ ---
+# --- ПУБЛИКАЦИЯ ПОСТОВ (С СТРОГОЙ ПРОВЕРКОЙ) ---
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'animation'])
 def handle_post(message):
@@ -520,16 +549,18 @@ def handle_post(message):
         return
 
     post_text = message.text or message.caption or ""
-    
-    has_forbidden = "Писать строго сюда" in post_text
-    has_required = ("🔥ГОРЯЧИЙ СЛОТ" in post_text) and ("Площадка:" in post_text) and ("Оплата:" in post_text)
 
-    if has_forbidden or not has_required:
+    # Строгая проверка регуляркой
+    if not validate_template_strict(post_text):
         bot.reply_to(
             message, 
-            "❌ **Неправильный шаблон!**\n\n"
-            "⚠️ *Убедитесь, что вы НЕ используете устаревшую строку 'Писать строго сюда'.*\n\n"
-            "👇 **Скопируйте актуальный чистый шаблон ниже:**\n\n" + f"<code>{TEMPLATE_TEXT}</code>", 
+            "❌ **Ошибка оформления поста!**\n\n"
+            "⚠️ *Пост отклонен, так как он нарушает структуру шаблона или содержит сторонние дописки.*\n\n"
+            "📌 **Правила заполнения:**\n"
+            "• Текст должен содержать только 3 заправленных поля.\n"
+            "• Не добавляйте ничего сверку или снизу шаблона.\n"
+            "• Все 3 поля (Площадка, Оплата, Что делать) должны быть заполнены.\n\n"
+            "👇 **Скопируйте чистый шаблон:**\n\n" + f"<code>{TEMPLATE_TEXT}</code>", 
             parse_mode="HTML"
         )
         return
@@ -588,16 +619,16 @@ def handle_post(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка публикации: {e}")
 
-# --- ЗАПУСК ПОТОКОВ И ПОЛЛИНГА ---
+# --- ЗАПУСК ПОТОКОВ И БЕСПЕРЕБОЙНОГО ПОЛЛИНГА ---
 
 threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions, daemon=True).start()
 
 if __name__ == '__main__':
+    print("Бот запущен и готов к высокими нагрузкам...")
     while True:
         try:
-            print("Бот запущен и готов к работе...")
-            bot.polling(none_stop=True, timeout=20, long_polling_timeout=20, skip_pending=True)
+            bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
         except Exception as e:
-            print(f"Ошибка сети: {e}. Переподключение...")
-            time.sleep(3)
+            print(f"Сетевой сбой: {e}. Переподключение через 5 секунд...")
+            time.sleep(5)
