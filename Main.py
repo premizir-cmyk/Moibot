@@ -25,9 +25,13 @@ COOLDOWN_FILE = os.path.join(DATA_DIR, 'cooldowns.json')
 NOTIFIED_FILE = os.path.join(DATA_DIR, 'notified.json')
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
 POSTS_FILE = os.path.join(DATA_DIR, 'active_posts.json')
+CD_NOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_notified.json')
 
 COOLDOWN_TIME = 9000    # 2.5 часа кулдаун между постами (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
+
+# Список запрещенных скам-слов
+FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом']
 
 # Потокобезопасность для работы с JSON
 file_lock = threading.Lock()
@@ -42,9 +46,9 @@ TEMPLATE_TEXT = """🔥ГОРЯЧИЙ СЛОТ
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
 1. **Строго по шаблону!** Любой сторонний текст до или после шаблона запрещен.
-2. **Запрещены юзернеймы и ссылки в тексте!** Для связи используется только кнопка под постом.
+2. **Запрещены юзернеймы, внешние ссылки и скам!** Для связи используется только кнопка под постом.
 3. **Кулдаун:** Между постами 2 часа 30 минут.
-4. **Запрещено:** Скамерство, спам, флуд.
+4. **Обязательна подписка** на наш канал.
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
 
@@ -72,19 +76,46 @@ def save_data(filename, data):
 def is_owner(user_id):
     return user_id in OWNER_ID
 
+def check_channel_subscription(user_id):
+    """Проверка подписки на основной канал"""
+    if is_owner(user_id):
+        return True
+    try:
+        member = bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ['creator', 'administrator', 'member']
+    except Exception:
+        return True  # В случае ошибки API пропускаем
+
 def is_user_active(user_id):
     if is_owner(user_id):
         return True
     users = load_data(DB_FILE)
     str_id = str(user_id)
     if str_id in users:
-        expire_time = users[str_id]
-        if time.time() < expire_time:
-            return True
-        else:
-            del users[str_id]
-            save_data(DB_FILE, users)
+        data = users[str_id]
+        if isinstance(data, dict):
+            exp_time = data.get("expire", 0)
+            posts_left = data.get("posts", 0)
+            if (exp_time > 0 and time.time() < exp_time) or posts_left > 0:
+                return True
+        elif isinstance(data, (int, float)):  # Поддержка старого формата баз
+            if time.time() < data:
+                return True
+            else:
+                del users[str_id]
+                save_data(DB_FILE, users)
     return False
+
+def consume_post_credit(user_id):
+    """Списывает 1 пост, если у пользователя поштучная оплата"""
+    if is_owner(user_id):
+        return
+    users = load_data(DB_FILE)
+    str_id = str(user_id)
+    if str_id in users and isinstance(users[str_id], dict):
+        if users[str_id].get("posts", 0) > 0:
+            users[str_id]["posts"] -= 1
+            save_data(DB_FILE, users)
 
 def get_cooldown_left(user_id):
     if is_owner(user_id):
@@ -104,6 +135,12 @@ def set_cooldown(user_id):
     cooldowns = load_data(COOLDOWN_FILE)
     cooldowns[str(user_id)] = time.time()
     save_data(COOLDOWN_FILE, cooldowns)
+    
+    # Сбрасываем флаг уведомления о выходе из КД
+    cd_notified = load_data(CD_NOTIFIED_FILE)
+    if str(user_id) in cd_notified:
+        del cd_notified[str(user_id)]
+        save_data(CD_NOTIFIED_FILE, cd_notified)
 
 def reset_cooldown(user_id):
     cooldowns = load_data(COOLDOWN_FILE)
@@ -139,23 +176,22 @@ def format_time(seconds):
         return f"{minutes} мин."
 
 def validate_template_strict(text):
-    """
-    Проверка шаблона + запрет на юзернеймы (@) и ссылки (t.me).
-    """
     if not text:
         return False, "Текст поста пуст."
     
     clean_text = text.strip()
 
-    # Запрет старых строк
     if "Писать строго сюда" in clean_text:
         return False, "Использована устаревшая строка 'Писать строго сюда'."
 
-    # Проверка на юзернеймы (@) и ссылки (t.me)
-    if "@" in clean_text or "t.me" in clean_text.lower() or "telegram.me" in clean_text.lower():
-        return False, "Запрещено указывать юзернеймы (@) или ссылки в тексте поста! Для связи есть кнопка под постом."
+    if "@" in clean_text or "t.me" in clean_text.lower() or "telegram.me" in clean_text.lower() or "http" in clean_text.lower():
+        return False, "Запрещено указывать юзернеймы (@) или ссылки в тексте поста!"
 
-    # Строгое регулярное выражение под структуру
+    # Антискам проверка
+    for word in FORBIDDEN_WORDS:
+        if word in clean_text.lower():
+            return False, f"Текст содержит запрещенное слово/тематику ({word})!"
+
     pattern = r"^🔥ГОРЯЧИЙ СЛОТ\s+❣️ Площадка:\s*(.+?)\s+💵 Оплата:\s*(.+?)\s+😀 Что нужно делать, От себя:\s*(.+)$"
     
     match = re.match(pattern, clean_text, re.DOTALL)
@@ -236,33 +272,51 @@ def auto_close_checker():
             
         time.sleep(15)
 
-def check_expiring_subscriptions():
+def check_expiring_subscriptions_and_cooldowns():
+    """Проверка подписок и отправка уведомления при выходе из КД"""
     while True:
         try:
             users = load_data(DB_FILE)
             notified = load_data(NOTIFIED_FILE)
+            cooldowns = load_data(COOLDOWN_FILE)
+            cd_notified = load_data(CD_NOTIFIED_FILE)
             now = time.time()
             
-            for u_id, exp_time in list(users.items()):
+            # 1. Проверка закінчення подписки
+            for u_id, u_info in list(users.items()):
+                exp_time = u_info.get("expire", 0) if isinstance(u_info, dict) else u_info
                 time_left = exp_time - now
                 if 0 < time_left <= 86400 and u_id not in notified:
                     try:
                         bot.send_message(
                             int(u_id), 
-                            "⚠️ **Внимание!** Ваша подписка закончится через 24 часа."
+                            f"⚠️ **Внимание!** Ваша подписка закончится через 24 часа.\nДля продления пишите {MY_USERNAME}",
+                            parse_mode="Markdown"
                         )
                         notified[u_id] = True
                         save_data(NOTIFIED_FILE, notified)
-                    except ApiTelegramException as e:
-                        if e.error_code in [403, 400]:
-                            notified[u_id] = True
-                            save_data(NOTIFIED_FILE, notified)
-                    except Exception as e:
-                        print(f"Ошибка предупреждения {u_id}: {e}")
+                    except:
+                        notified[u_id] = True
+                        save_data(NOTIFIED_FILE, notified)
+
+            # 2. Уведомление об окончании кулдауна
+            for u_id, last_time in list(cooldowns.items()):
+                if now - last_time >= COOLDOWN_TIME and u_id not in cd_notified:
+                    try:
+                        bot.send_message(
+                            int(u_id),
+                            "⚡ **Твой кулдаун окончен!**\nВы можете опубликовать новый слот прямо сейчас.",
+                            parse_mode="Markdown"
+                        )
+                    except:
+                        pass
+                    cd_notified[u_id] = True
+                    save_data(CD_NOTIFIED_FILE, cd_notified)
+
         except Exception as e:
-            print(f"Ошибка проверки подписок: {e}")
+            print(f"Ошибка фона: {e}")
             
-        time.sleep(3600)
+        time.sleep(60)
 
 # --- КЛАВИАТУРЫ И МЕНЮ ---
 
@@ -287,9 +341,12 @@ def get_back_keyboard():
 def get_admin_help_text():
     return (
         "🛠 **ПАНЕЛЬ УПРАВЛЕНИЯ ВЛАДЕЛЬЦА:**\n\n"
-        "🟢 `/add ID ДНИ` — Выдать доступ пользователю\n"
+        "🟢 `/add ID ДНИ [ПОСТЫ]` — Выдать доступ (Пример: `/add 12345 30` или `/add 12345 0 5` на 5 постов)\n"
         "🔴 `/del ID` — Забрать доступ у пользователя\n"
-        "📋 `/list` — Список активных подписок с юзернеймами\n"
+        "👤 `/user ID` — Карточка пользователя\n"
+        "📋 `/list` — Список активных подписок\n"
+        "📊 `/stats` — Статистика бота\n"
+        "📢 `/broadcast ТЕКСТ` — Рассылка пользователям\n"
         "⚡ `/uncd ID` — Сбросить кулдаун юзеру\n"
         "📜 `/history` — Посмотреть последние посты\n"
     )
@@ -310,8 +367,15 @@ def add_user(message):
         args = message.text.split()
         target_id = str(args[1])
         days = int(args[2])
+        posts = int(args[3]) if len(args) > 3 else 0
+
         users = load_data(DB_FILE)
-        users[target_id] = time.time() + (days * 86400)
+        exp_time = time.time() + (days * 86400) if days > 0 else 0
+        
+        users[target_id] = {
+            "expire": exp_time,
+            "posts": posts
+        }
         save_data(DB_FILE, users)
         
         notified = load_data(NOTIFIED_FILE)
@@ -319,13 +383,19 @@ def add_user(message):
             del notified[target_id]
             save_data(NOTIFIED_FILE, notified)
 
-        bot.reply_to(message, f"✅ Доступ для ID {target_id} выдан на {days} дней!")
+        msg_text = f"✅ Доступ для ID `{target_id}` успешно обновлен!\n"
+        if days > 0:
+            msg_text += f"• Подписка: **{days} дн.**\n"
+        if posts > 0:
+            msg_text += f"• Разовые посты: **{posts} шт.**"
+
+        bot.reply_to(message, msg_text, parse_mode="Markdown")
         try:
-            bot.send_message(int(target_id), f"🎉 **Вам выдан доступ на {days} дн.!**\n\nНажмите /start, чтобы начать.")
+            bot.send_message(int(target_id), f"🎉 **Вам обновлен доступ к боту!**\n\n{msg_text}\n\nНажмите /start для начала.")
         except:
             pass
     except Exception:
-        bot.reply_to(message, "❌ Формат: /add ID ДНИ")
+        bot.reply_to(message, "❌ Формат: `/add ID ДНИ [ПОСТЫ]`\nПример на дни: `/add 12345 30`\nПример на посты: `/add 12345 0 5`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['del'])
 def del_user(message):
@@ -337,11 +407,103 @@ def del_user(message):
         if target_id in users:
             del users[target_id]
             save_data(DB_FILE, users)
-            bot.reply_to(message, f"⛔ Доступ для ID {target_id} аннулирован.")
+            bot.reply_to(message, f"⛔ Доступ для ID `{target_id}` аннулирован.", parse_mode="Markdown")
         else:
             bot.reply_to(message, "Юзер не найден в базе.")
     except:
-        bot.reply_to(message, "Формат: /del ID")
+        bot.reply_to(message, "Формат: `/del ID`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['user'])
+def user_info_cmd(message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        arg = message.text.split()[1].replace('@', '')
+        users = load_data(DB_FILE)
+        target_id = None
+
+        if arg.isdigit() and arg in users:
+            target_id = arg
+        else:
+            # Поиск по юзернейму в истории
+            history = load_data(HISTORY_FILE)
+            for h in reversed(history):
+                if h.get('username', '').lower() == arg.lower():
+                    target_id = str(h['user_id'])
+                    break
+
+        if not target_id or target_id not in users:
+            bot.reply_to(message, "❌ Пользователь не найден в активной базе.")
+            return
+
+        u_info = users[target_id]
+        now = time.time()
+        
+        exp_time = u_info.get("expire", 0) if isinstance(u_info, dict) else u_info
+        posts_left = u_info.get("posts", 0) if isinstance(u_info, dict) else 0
+        
+        days_left = round((exp_time - now) / 86400, 1) if exp_time > now else 0
+        cd_left = get_cooldown_left(target_id)
+        
+        text = (
+            f"👤 **Карточка юзера `ID {target_id}`:**\n\n"
+            f"• Подписка по дням: **{days_left} дн.**\n"
+            f"• Оставшиеся посты: **{posts_left} шт.**\n"
+            f"• Кулдаун: **{format_time(cd_left) if cd_left > 0 else 'Нет'}**"
+        )
+        bot.reply_to(message, text, parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, "❌ Формат: `/user ID` или `/user @username`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    if not is_owner(message.from_user.id):
+        return
+    users = load_data(DB_FILE)
+    history = load_data(HISTORY_FILE)
+    active_posts = load_data(POSTS_FILE)
+    
+    active_sub_count = 0
+    now = time.time()
+    for u_info in users.values():
+        exp = u_info.get("expire", 0) if isinstance(u_info, dict) else u_info
+        pts = u_info.get("posts", 0) if isinstance(u_info, dict) else 0
+        if (exp > now) or pts > 0:
+            active_sub_count += 1
+            
+    text = (
+        "📊 **СТАТИСТИКА БОТА:**\n\n"
+        f"👥 Всего пользователей с доступом: **{len(users)}**\n"
+        f"🟢 Активных подписок/постов: **{active_sub_count}**\n"
+        f"📌 Постов в истории: **{len(history)}**\n"
+        f"⏳ Активных слотов сейчас: **{len(active_posts)}**"
+    )
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_cmd(message):
+    if not is_owner(message.from_user.id):
+        return
+    text_to_send = message.text.replace('/broadcast', '').strip()
+    if not text_to_send:
+        bot.reply_to(message, "❌ Напишите текст рассылки: `/broadcast Текст...`", parse_mode="Markdown")
+        return
+
+    users = load_data(DB_FILE)
+    success = 0
+    failed = 0
+
+    bot.reply_to(message, f"📢 Запускаю рассылку на {len(users)} пользователей...")
+    
+    for u_id in list(users.keys()):
+        try:
+            bot.send_message(int(u_id), f"📢 **Объявление:**\n\n{text_to_send}", parse_mode="Markdown")
+            success += 1
+            time.sleep(0.05)
+        except:
+            failed += 1
+
+    bot.send_message(message.chat.id, f"✅ **Рассылка завершена!**\nУспешно: {success} | Ошибок: {failed}", parse_mode="Markdown")
 
 @bot.message_handler(commands=['list'])
 def list_users(message):
@@ -352,23 +514,30 @@ def list_users(message):
         bot.reply_to(message, "Список платных подписок пуст.")
         return
     
-    text = "📋 **Активные подписки:**\n\n"
+    text = "📋 **Активные подписки и посты:**\n\n"
     now = time.time()
     
-    for u_id, exp_time in list(users.items()):
+    for u_id, u_info in list(users.items()):
+        exp_time = u_info.get("expire", 0) if isinstance(u_info, dict) else u_info
+        posts_left = u_info.get("posts", 0) if isinstance(u_info, dict) else 0
+        
         left_days = round((exp_time - now) / 86400, 1)
-        if left_days > 0:
+        if left_days > 0 or posts_left > 0:
             user_tag = f"ID `{u_id}`"
             try:
                 chat_info = bot.get_chat(int(u_id))
                 if chat_info.username:
                     user_tag = f"@{chat_info.username} (`{u_id}`)"
-                elif chat_info.first_name:
-                    user_tag = f"[{chat_info.first_name}](tg://user?id={u_id}) (`{u_id}`)"
             except:
                 pass
                 
-            text += f"• {user_tag} — осталось **{left_days} дн.**\n"
+            info_str = []
+            if left_days > 0:
+                info_str.append(f"{left_days} дн.")
+            if posts_left > 0:
+                info_str.append(f"{posts_left} постов")
+                
+            text += f"• {user_tag} — осталось: **{', '.join(info_str)}**\n"
         else:
             del users[u_id]
             save_data(DB_FILE, users)
@@ -384,7 +553,7 @@ def reset_cooldown_command(message):
         reset_cooldown(target_id)
         bot.reply_to(message, f"⚡ Кулдаун для ID `{target_id}` успешно сброшен!", parse_mode="Markdown")
     except Exception:
-        bot.reply_to(message, "❌ Формат: /uncd ID", parse_mode="Markdown")
+        bot.reply_to(message, "❌ Формат: `/uncd ID`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['history'])
 def show_history(message):
@@ -497,15 +666,26 @@ def callback_handler(call):
     elif call.data == "my_profile":
         bot.answer_callback_query(call.id)
         if is_owner(user_id):
-            prof_text = "👑 У вас статус **Владельца** (без КД и без ограничений по подписке)."
+            prof_text = "👑 У вас статус **Владельца** (без КД и ограничений)."
         elif is_user_active(user_id):
             users = load_data(DB_FILE)
-            left = round((users[str(user_id)] - time.time()) / 86400, 1)
+            u_info = users.get(str(user_id), {})
+            
+            exp = u_info.get("expire", 0) if isinstance(u_info, dict) else u_info
+            pts = u_info.get("posts", 0) if isinstance(u_info, dict) else 0
+            
+            left_days = round((exp - time.time()) / 86400, 1) if exp > time.time() else 0
             cd = get_cooldown_left(user_id)
             cd_str = format_time(cd) if cd > 0 else "Отсутствует (можно выкладывать пост)"
-            prof_text = f"👤 **Ваш профиль:**\n\n• Подписка активна ещё: ~**{left} дн.**\n• Текущий кулдаун: **{cd_str}**"
+            
+            prof_text = f"👤 **Ваш профиль:**\n\n"
+            if left_days > 0:
+                prof_text += f"• Подписка по дням: ~**{left_days} дн.**\n"
+            if pts > 0:
+                prof_text += f"• Разовые посты: **{pts} шт.**\n"
+            prof_text += f"• Текущий кулдаун: **{cd_str}**"
         else:
-            prof_text = "⛔ У вас нет активной подписки."
+            prof_text = "⛔ У вас нет активной подписки или доступных постов."
 
         bot.edit_message_text(
             chat_id=call.message.chat.id,
@@ -554,10 +734,21 @@ def handle_post(message):
 
     user_id = message.from_user.id
     
-    if not is_user_active(user_id):
-        bot.reply_to(message, f"⛔ Публикация отклонена. Подписка истекла или не куплена.\nВаш ID: `{user_id}`", parse_mode="Markdown")
+    # 1. Проверка подписки на канал
+    if not check_channel_subscription(user_id):
+        bot.reply_to(
+            message, 
+            f"❌ **Для использования бота вы должны быть подписаны на наш канал {CHANNEL_ID}!**\n Подпишитесь и отправьте пост снова.",
+            parse_mode="Markdown"
+        )
         return
 
+    # 2. Проверка активности профиля
+    if not is_user_active(user_id):
+        bot.reply_to(message, f"⛔ Публикация отклонена. Подписка истекла или закончились посты.\nВаш ID: `{user_id}`", parse_mode="Markdown")
+        return
+
+    # 3. Проверка кулдауна
     cooldown_left = get_cooldown_left(user_id)
     if cooldown_left > 0:
         time_str = format_time(cooldown_left)
@@ -566,7 +757,7 @@ def handle_post(message):
 
     post_text = message.text or message.caption or ""
 
-    # Проверка шаблона и юзернеймов
+    # 4. Проверка шаблона и антискам
     is_valid, err_reason = validate_template_strict(post_text)
     if not is_valid:
         bot.reply_to(
@@ -597,6 +788,9 @@ def handle_post(message):
             message_id=published_msg.message_id,
             reply_markup=markup
         )
+
+        # Списание разового поста (если доступ поштучный)
+        consume_post_credit(user_id)
 
         set_cooldown(user_id)
         save_to_history(user_id, username, post_text)
@@ -635,7 +829,7 @@ def handle_post(message):
 # --- ЗАПУСК ПОТОКОВ И ПОЛЛИНГА ---
 
 threading.Thread(target=auto_close_checker, daemon=True).start()
-threading.Thread(target=check_expiring_subscriptions, daemon=True).start()
+threading.Thread(target=check_expiring_subscriptions_and_cooldowns, daemon=True).start()
 
 if __name__ == '__main__':
     print("Бот запущен и готов к высокими нагрузкам...")
