@@ -42,8 +42,9 @@ TEMPLATE_TEXT = """🔥ГОРЯЧИЙ СЛОТ
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
 1. **Строго по шаблону!** Любой сторонний текст до или после шаблона запрещен.
-2. **Кулдаун:** Между постами 2 часа 30 минут.
-3. **Запрещено:** Скамерство, спам, флуд, сторонние ссылки.
+2. **Запрещены юзернеймы и ссылки в тексте!** Для связи используется только кнопка под постом.
+3. **Кулдаун:** Между постами 2 часа 30 минут.
+4. **Запрещено:** Скамерство, спам, флуд.
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
 
@@ -139,31 +140,33 @@ def format_time(seconds):
 
 def validate_template_strict(text):
     """
-    Жесткая проверка структуры шаблона.
-    Текст должен строго начинаться с 🔥ГОРЯЧИЙ СЛОТ и не содержать стороннего мусора.
+    Проверка шаблона + запрет на юзернеймы (@) и ссылки (t.me).
     """
     if not text:
-        return False
+        return False, "Текст поста пуст."
     
     clean_text = text.strip()
 
-    # Запрещаем старые строки
+    # Запрет старых строк
     if "Писать строго сюда" in clean_text:
-        return False
+        return False, "Использована устаревшая строка 'Писать строго сюда'."
+
+    # Проверка на юзернеймы (@) и ссылки (t.me)
+    if "@" in clean_text or "t.me" in clean_text.lower() or "telegram.me" in clean_text.lower():
+        return False, "Запрещено указывать юзернеймы (@) или ссылки в тексте поста! Для связи есть кнопка под постом."
 
     # Строгое регулярное выражение под структуру
     pattern = r"^🔥ГОРЯЧИЙ СЛОТ\s+❣️ Площадка:\s*(.+?)\s+💵 Оплата:\s*(.+?)\s+😀 Что нужно делать, От себя:\s*(.+)$"
     
     match = re.match(pattern, clean_text, re.DOTALL)
     if not match:
-        return False
+        return False, "Нарушена структура шаблона или добавлен лишний текст снаружи шаблона."
         
-    # Проверяем, что поля не пустые
     platform, payment, description = match.groups()
     if not platform.strip() or not payment.strip() or not description.strip():
-        return False
+        return False, "Все поля шаблона должны быть заполнены!"
 
-    return True
+    return True, "OK"
 
 # --- ЛОГИКА ЗАКРЫТИЯ ПОСТА В КАНАЛЕ ---
 
@@ -286,7 +289,7 @@ def get_admin_help_text():
         "🛠 **ПАНЕЛЬ УПРАВЛЕНИЯ ВЛАДЕЛЬЦА:**\n\n"
         "🟢 `/add ID ДНИ` — Выдать доступ пользователю\n"
         "🔴 `/del ID` — Забрать доступ у пользователя\n"
-        "📋 `/list` — Список активных подписок\n"
+        "📋 `/list` — Список активных подписок с юзернеймами\n"
         "⚡ `/uncd ID` — Сбросить кулдаун юзеру\n"
         "📜 `/history` — Посмотреть последние посты\n"
     )
@@ -348,16 +351,29 @@ def list_users(message):
     if not users:
         bot.reply_to(message, "Список платных подписок пуст.")
         return
-    text = "📋 Активные подписки:\n\n"
+    
+    text = "📋 **Активные подписки:**\n\n"
     now = time.time()
+    
     for u_id, exp_time in list(users.items()):
         left_days = round((exp_time - now) / 86400, 1)
         if left_days > 0:
-            text += f"• ID: {u_id} — осталось {left_days} дн.\n"
+            user_tag = f"ID `{u_id}`"
+            try:
+                chat_info = bot.get_chat(int(u_id))
+                if chat_info.username:
+                    user_tag = f"@{chat_info.username} (`{u_id}`)"
+                elif chat_info.first_name:
+                    user_tag = f"[{chat_info.first_name}](tg://user?id={u_id}) (`{u_id}`)"
+            except:
+                pass
+                
+            text += f"• {user_tag} — осталось **{left_days} дн.**\n"
         else:
             del users[u_id]
             save_data(DB_FILE, users)
-    bot.reply_to(message, text)
+            
+    bot.reply_to(message, text, parse_mode="Markdown")
 
 @bot.message_handler(commands=['uncd', 'uncooldown'])
 def reset_cooldown_command(message):
@@ -529,7 +545,7 @@ def send_welcome(message):
             parse_mode="Markdown"
         )
 
-# --- ПУБЛИКАЦИЯ ПОСТОВ (С СТРОГОЙ ПРОВЕРКОЙ) ---
+# --- ПУБЛИКАЦИЯ ПОСТОВ ---
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document', 'animation'])
 def handle_post(message):
@@ -550,16 +566,13 @@ def handle_post(message):
 
     post_text = message.text or message.caption or ""
 
-    # Строгая проверка регуляркой
-    if not validate_template_strict(post_text):
+    # Проверка шаблона и юзернеймов
+    is_valid, err_reason = validate_template_strict(post_text)
+    if not is_valid:
         bot.reply_to(
             message, 
-            "❌ **Ошибка оформления поста!**\n\n"
-            "⚠️ *Пост отклонен, так как он нарушает структуру шаблона или содержит сторонние дописки.*\n\n"
-            "📌 **Правила заполнения:**\n"
-            "• Текст должен содержать только 3 заправленных поля.\n"
-            "• Не добавляйте ничего сверку или снизу шаблона.\n"
-            "• Все 3 поля (Площадка, Оплата, Что делать) должны быть заполнены.\n\n"
+            f"❌ **Ошибка публикации!**\n\n"
+            f"⚠️ *Причина:* {err_reason}\n\n"
             "👇 **Скопируйте чистый шаблон:**\n\n" + f"<code>{TEMPLATE_TEXT}</code>", 
             parse_mode="HTML"
         )
@@ -619,7 +632,7 @@ def handle_post(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка публикации: {e}")
 
-# --- ЗАПУСК ПОТОКОВ И БЕСПЕРЕБОЙНОГО ПОЛЛИНГА ---
+# --- ЗАПУСК ПОТОКОВ И ПОЛЛИНГА ---
 
 threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions, daemon=True).start()
