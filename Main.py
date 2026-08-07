@@ -41,13 +41,14 @@ AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (�
 # Расширенный список запрещенных скам-слов
 FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом', 'пробив', 'софт']
 
-# Ключевые слова, указывающие на РЕАЛЬНОЕ задание / слот
+# Ключевые слова, указывающие на РЕАЛЬНОЕ задание / слот (с добавленными SMM-категориями)
 TASK_KEYWORDS = [
     'отзыв', 'оценка', 'звезд', 'звёзд', 'карты', 'яндекс', 'гугл', 'авито', '2гис', 'профиль',
     'пушкинск', 'пушка', 'билет', 'мероприятие', 'баланс',
     'wb', 'wildberries', 'вайлдберриз', 'озон', 'ozon', 'мегамаркет', 'выкуп', 'избранное', 'товар',
     'написать', 'оформить', 'скачать', 'подписка', 'регистрация', 'рег', 'пройти', 'прогрев',
-    'аккаунт', 'акк', 'номер', 'смс', 'приложение', 'промокод'
+    'аккаунт', 'акк', 'номер', 'смс', 'приложение', 'промокод',
+    'соцсети', 'соцсетей', 'контент', 'reels', 'посты', 'сторис', 'работа', 'вакансия'
 ]
 
 file_lock = threading.Lock()
@@ -479,15 +480,17 @@ def backup_scheduler():
 
 def quiet_hours_channel_announcer():
     tz = pytz.timezone('Europe/Moscow')
-    night_posted = False
-    morning_posted = False
+    night_posted_date = None
+    morning_posted_date = None
 
     while True:
         try:
             now = datetime.now(tz)
+            today_str = now.strftime('%Y-%m-%d')
             settings = load_settings()
 
-            if now.hour == 0 and now.minute == 0 and not night_posted:
+            # Ночной перерыв (срабатывает в 00:00 или 00:01)
+            if now.hour == 0 and now.minute < 2 and night_posted_date != today_str:
                 text_night = (
                     "🌙 **Канал уходит на ночной перерыв!**\n\n"
                     "😴 Все слоты и задания отправляются отдыхать до 10:00 утра, чтобы никому не мешать спать.\n\n"
@@ -499,9 +502,10 @@ def quiet_hours_channel_announcer():
                     bot.send_photo(CHANNEL_ID, photo, caption=text_night, parse_mode="Markdown")
                 else:
                     bot.send_message(CHANNEL_ID, text_night, parse_mode="Markdown")
-                night_posted, morning_posted = True, False
+                night_posted_date = today_str
 
-            elif now.hour == 10 and now.minute == 0 and not morning_posted:
+            # Утреннее пробуждение (срабатывает в 10:00 или 10:01)
+            elif now.hour == 10 and now.minute < 2 and morning_posted_date != today_str:
                 text_morning = (
                     "☀️ **Доброе утро! Канал проснулся!**\n\n"
                     "🚀 Тихий час окончен — выкладка заданий снова активна!\n\n"
@@ -513,10 +517,7 @@ def quiet_hours_channel_announcer():
                     bot.send_photo(CHANNEL_ID, photo, caption=text_morning, parse_mode="Markdown")
                 else:
                     bot.send_message(CHANNEL_ID, text_morning, parse_mode="Markdown")
-                morning_posted, night_posted = True, False
-
-            if now.hour == 1: night_posted = False
-            if now.hour == 11: morning_posted = False
+                morning_posted_date = today_str
 
         except Exception as e:
             print(f"Ошибка тихого часа: {e}")
@@ -881,7 +882,6 @@ def callback_handler(call):
                 print(f"Ошибка отправки уведомления: {e}")
         return
 
-    # ВЫБОР: ЗАБРОНИРОВАТЬ ВРЕМЯ (УБРАНА КНОПКА МГНОВЕННОЙ ВЫКЛАДКИ)
     if call.data == "confirm_publish":
         bot.answer_callback_query(call.id)
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
@@ -928,7 +928,6 @@ def callback_handler(call):
 
         dt_formatted = datetime.fromtimestamp(float(timestamp_key), pytz.timezone('Europe/Moscow')).strftime('%H:%M МСК')
         
-        # Информируем об успешной брони И о том, как отменить бронь
         success_text = (
             f"✅ **Слот успешно забронирован на {dt_formatted}!**\n\n"
             "Бот автоматически опубликует ваш пост в указанное время минута в минуту.\n\n"
@@ -943,7 +942,6 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # УПРАВЛЕНИЕ АКТИВНЫМИ БРОНЯМИ (ПОЛЬЗОВАТЕЛЬСКОЕ МЕНЮ)
     elif call.data == "my_scheduled_posts":
         bot.answer_callback_query(call.id)
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
@@ -979,7 +977,6 @@ def callback_handler(call):
             del scheduled_data[ts_to_cancel]
             save_data(SCHEDULED_POSTS_FILE, scheduled_data)
 
-        # Перенаправляем обратно в список броней
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
         user_bookings = {ts: info for ts, info in scheduled_data.items() if info.get("user_id") == user_id}
 
@@ -1063,7 +1060,7 @@ def callback_handler(call):
     elif call.data == "open_admin_help":
         if is_owner(user_id):
             bot.answer_callback_query(call.id)
-            bot.edit_message_text(get_admin_help_text(), chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown", reply_markup=get_back_keyboard())
+            bot.edit_message_text(get_admin_help_text(), chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_back_keyboard())
 
 # --- ПОШАГОВЫЙ ВВОД И ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ---
 
@@ -1192,7 +1189,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен: мгновенная публикация убрана, добавлена система бронирования и отмены броней...")
+    print("Бот запущен: исправлен запуск ночных/утренних оповещений по времени...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
