@@ -27,7 +27,7 @@ COOLDOWN_FILE = os.path.join(DATA_DIR, 'cooldowns.json')
 NOTIFIED_FILE = os.path.join(DATA_DIR, 'notified.json')
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
 POSTS_FILE = os.path.join(DATA_DIR, 'active_posts.json')
-SCHEDULED_POSTS_FILE = os.path.join(DATA_DIR, 'scheduled_posts.json') # Хранилище отложенных постов
+SCHEDULED_POSTS_FILE = os.path.join(DATA_DIR, 'scheduled_posts.json')
 CD_NOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_notified.json')
 CD_PRENOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_prenotified.json')
 BAN_FILE = os.path.join(DATA_DIR, 'blacklist.json')
@@ -41,7 +41,7 @@ AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (�
 # Расширенный список запрещенных скам-слов
 FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом', 'пробив', 'софт']
 
-# Ключевые слова, указывающие на РЕАЛЬНОЕ задание / слот (с добавленными SMM-категориями)
+# Ключевые слова, указывающие на РЕАЛЬНОЕ задание / слот
 TASK_KEYWORDS = [
     'отзыв', 'оценка', 'звезд', 'звёзд', 'карты', 'яндекс', 'гугл', 'авито', '2гис', 'профиль',
     'пушкинск', 'пушка', 'билет', 'мероприятие', 'баланс',
@@ -54,8 +54,8 @@ TASK_KEYWORDS = [
 file_lock = threading.Lock()
 
 # Хранилища временных состояний
-user_creation_data = {}  # Для пошагового ввода {user_id: {'step': 1, 'platform': '', ...}}
-user_states = {}         # Для ввода репортов на скам
+user_creation_data = {}  
+user_states = {}         
 
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
@@ -118,11 +118,6 @@ def is_banned(user_id):
 
 def is_owner(user_id):
     return user_id in OWNER_ID
-
-def is_quiet_hours():
-    tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(tz)
-    return 0 <= now.hour < 10
 
 def check_channel_subscription(user_id):
     if is_owner(user_id):
@@ -241,7 +236,7 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ БРОНИРОВАНИЯ С УЧЕТОМ КД ---
+# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ С КНОПКОЙ ОБНОВЛЕНИЯ ---
 def get_available_slots_keyboard(user_id):
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
@@ -287,6 +282,8 @@ def get_available_slots_keyboard(user_id):
         markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
         slot_dt += timedelta(minutes=20)
 
+    # Кнопка обновления времени прямо в сетке бронирования
+    markup.add(types.InlineKeyboardButton(text="🔄 Обновить слоты", callback_data="refresh_slots"))
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
     return markup
 
@@ -335,7 +332,6 @@ def send_backup_to_owner():
 # --- ФОНОВЫЕ ПОТОКИ ---
 
 def scheduled_posts_checker():
-    """Фоновый поток: проверяет отложенные посты и публикует их минута в минуту"""
     while True:
         try:
             scheduled_data = load_data(SCHEDULED_POSTS_FILE)
@@ -370,9 +366,17 @@ def scheduled_posts_checker():
                             set_cooldown(user_id)
                             save_to_history(user_id, username, final_text)
                             
+                            # Сохраняем шаблон в память для быстрого повтора
+                            user_creation_data[user_id] = {
+                                'platform': platform,
+                                'payment': payment,
+                                'desc': final_text,
+                                'final_text': final_text
+                            }
+
                             confirm_markup = types.InlineKeyboardMarkup(row_width=2)
                             confirm_markup.add(
-                                types.InlineKeyboardButton(text="🔄 Повторить пост", callback_data="start_create_post"),
+                                types.InlineKeyboardButton(text="🔄 Повторить пост", callback_data="repeat_last_post"),
                                 types.InlineKeyboardButton(text="📝 Новый пост", callback_data="start_create_post")
                             )
                             confirm_markup.add(types.InlineKeyboardButton(text="📱 Главное меню", callback_data="main_menu"))
@@ -489,7 +493,6 @@ def quiet_hours_channel_announcer():
             today_str = now.strftime('%Y-%m-%d')
             settings = load_settings()
 
-            # Ночной перерыв (срабатывает в 00:00 или 00:01)
             if now.hour == 0 and now.minute < 2 and night_posted_date != today_str:
                 text_night = (
                     "🌙 **Канал уходит на ночной перерыв!**\n\n"
@@ -504,7 +507,6 @@ def quiet_hours_channel_announcer():
                     bot.send_message(CHANNEL_ID, text_night, parse_mode="Markdown")
                 night_posted_date = today_str
 
-            # Утреннее пробуждение (срабатывает в 10:00 или 10:01)
             elif now.hour == 10 and now.minute < 2 and morning_posted_date != today_str:
                 text_morning = (
                     "☀️ **Доброе утро! Канал проснулся!**\n\n"
@@ -896,6 +898,17 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
+    elif call.data == "refresh_slots":
+        bot.answer_callback_query(call.id, "🔄 Слот-сетка обновлена!")
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=get_available_slots_keyboard(user_id)
+            )
+        except Exception:
+            pass
+
     elif call.data == "slot_busy":
         bot.answer_callback_query(call.id, "❌ Этот временной слот уже занят другим пользователем. Выберите другое время!", show_alert=True)
 
@@ -910,7 +923,7 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, "❌ Ошибка данных. Начните заново.")
             return
 
-        c_data = user_creation_data.pop(user_id)
+        c_data = user_creation_data[user_id]
         
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
         if not isinstance(scheduled_data, dict):
@@ -1016,6 +1029,55 @@ def callback_handler(call):
 
         user_creation_data[user_id] = {'step': 1}
         bot.send_message(call.message.chat.id, "📌 **Шаг 1 из 3:**\nВведите площадку (например: *Яндекс Карты, Авито, Пушкинская карта*):", parse_mode="Markdown")
+
+    elif call.data == "repeat_last_post":
+        bot.answer_callback_query(call.id)
+        if not check_channel_subscription(user_id):
+            bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
+            return
+        if not is_user_active(user_id):
+            bot.send_message(call.message.chat.id, f"⛔ У вас нет активного доступа.\nВаш ID: `{user_id}`", parse_mode="Markdown")
+            return
+        cd = get_cooldown_left(user_id)
+        if cd > 0:
+            bot.send_message(call.message.chat.id, f"⏳ Кулдаун еще **{format_time(cd)}**.")
+            return
+
+        if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
+            bot.send_message(call.message.chat.id, "❌ Не найден сохраненный прошлый пост. Нажмите «📝 Выставить пост».", reply_markup=get_back_keyboard())
+            return
+
+        # Сгенерируем новый номер слота для повторенного поста
+        slot_num = get_next_slot_id()
+        c_data = user_creation_data[user_id]
+        
+        # Обновим номер слота в тексте
+        platform = c_data.get('platform', '')
+        payment = c_data.get('payment', '')
+        desc = c_data.get('desc', '')
+
+        final_text = (
+            f"🔥ГОРЯЧИЙ СЛОТ #{slot_num}\n\n"
+            f"❣️ Площадка: {platform}\n"
+            f"💵 Оплата: {payment}\n"
+            f"😀 Что нужно делать, От себя: {desc}"
+        )
+        user_creation_data[user_id]['final_text'] = final_text
+        user_creation_data[user_id]['slot_num'] = slot_num
+
+        preview_markup = types.InlineKeyboardMarkup(row_width=1)
+        preview_markup.add(
+            types.InlineKeyboardButton(text="⏱ Забронировать время по МСК", callback_data="confirm_publish"),
+            types.InlineKeyboardButton(text="✏️ Редактировать", callback_data="start_create_post"),
+            types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish")
+        )
+
+        bot.send_message(
+            call.message.chat.id, 
+            f"👁 **ПРЕДПРОСМОТР ВАШЕГО ПОВТОРЕННОГО ПОСТА:**\n\n{final_text}\n\n-------------------\nВсе указано верно?",
+            reply_markup=preview_markup,
+            parse_mode="Markdown"
+        )
 
     elif call.data == "cancel_publish":
         bot.answer_callback_query(call.id, "Отменено.")
@@ -1189,7 +1251,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен: исправлен запуск ночных/утренних оповещений по времени...")
+    print("Бот запущен с кнопкой обновления времени и стабильным повтором постов...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
