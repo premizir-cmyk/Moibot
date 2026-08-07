@@ -32,6 +32,7 @@ CD_PRENOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_prenotified.json')
 BAN_FILE = os.path.join(DATA_DIR, 'blacklist.json')
 SLOT_COUNTER_FILE = os.path.join(DATA_DIR, 'slot_counter.json')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
+BACKUP_LOG_FILE = os.path.join(DATA_DIR, 'backup_log.json')
 
 COOLDOWN_TIME = 9000    # 2.5 часа кулдаун между постами (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
@@ -239,7 +240,31 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ФУНКЦИИ БЭКАПА ---
+# --- ФУНКЦИИ БЭКАПА С ЗАЩИТОЙ ОТ СПАМА ---
+
+def can_send_backup():
+    """Проверяет, отправлялся ли бэкап сегодня"""
+    with file_lock:
+        if not os.path.exists(BACKUP_LOG_FILE):
+            return True
+        try:
+            with open(BACKUP_LOG_FILE, 'r') as f:
+                last_date_str = json.load(f).get('last_backup_date')
+                if not last_date_str: return True
+                
+                last_date = datetime.strptime(last_date_str, '%Y-%m-%d').date()
+                today = datetime.now().date()
+                
+                return today > last_date
+        except:
+            return True
+
+def log_backup_sent():
+    """Записывает сегодняшнюю дату как дату последней отправки"""
+    with file_lock:
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        with open(BACKUP_LOG_FILE, 'w') as f:
+            json.dump({'last_backup_date': today_str}, f)
 
 def send_backup_to_owner():
     """Упаковывает все JSON базы в ZIP и отсылает владельцу"""
@@ -329,14 +354,17 @@ def check_expiring_subscriptions_and_cooldowns():
         time.sleep(30)
 
 def backup_scheduler():
-    """Фоновый поток: отправка авто-бэкапа каждые 24 часа"""
+    """Фоновый поток: авто-бэкап 1 раз в сутки (с защитой от спама)"""
     time.sleep(10)
     while True:
         try:
-            send_backup_to_owner()
+            if can_send_backup():
+                send_backup_to_owner()
+                log_backup_sent()
+                print(f"[{datetime.now()}] Авто-бэкап успешно отправлен.")
         except Exception as e:
             print(f"Ошибка автобэкапа: {e}")
-        time.sleep(86400)
+        time.sleep(3600)  # Проверка каждый час
 
 def quiet_hours_channel_announcer():
     """Фоновый поток: публикует ночные и утренние открытки в канал по МСК"""
@@ -1039,7 +1067,7 @@ threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен со всеми функциями, бэкапами и Тихим часом...")
+    print("Бот запущен со всеми функциями, исправленным бэкапом и Тихим часом...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
