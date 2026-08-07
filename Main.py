@@ -7,7 +7,7 @@ import zipfile
 import telebot
 import threading
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from telebot import types
 
 # --- ОСНОВНЫЕ НАСТРОЙКИ ПОД ТВОЙ КАНАЛ И БОТА ---
@@ -27,6 +27,7 @@ COOLDOWN_FILE = os.path.join(DATA_DIR, 'cooldowns.json')
 NOTIFIED_FILE = os.path.join(DATA_DIR, 'notified.json')
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
 POSTS_FILE = os.path.join(DATA_DIR, 'active_posts.json')
+SCHEDULED_POSTS_FILE = os.path.join(DATA_DIR, 'scheduled_posts.json') # Хранилище отложенных постов
 CD_NOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_notified.json')
 CD_PRENOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_prenotified.json')
 BAN_FILE = os.path.join(DATA_DIR, 'blacklist.json')
@@ -240,10 +241,48 @@ def close_post_in_channel(message_id):
         except:
             return False
 
+# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ БРОНИРОВАНИЯ ---
+def get_available_slots_keyboard():
+    """Генерирует слоты времени с шагом 20 минут на 1 час вперед по МСК"""
+    tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(tz)
+    
+    # Округляем до ближайших 20 минут вперед
+    minute = now.minute
+    rem = minute % 20
+    add_min = 20 - rem if rem != 0 else 20
+    next_slot_time = now + timedelta(minutes=add_min)
+    next_slot_time = next_slot_time.replace(second=0, microsecond=0)
+
+    scheduled_data = load_data(SCHEDULED_POSTS_FILE)
+    if not isinstance(scheduled_data, dict):
+        scheduled_data = {}
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    # Создаем 3 слота (на 1 час вперед с шагом 20 минут)
+    for i in range(3):
+        slot_dt = next_slot_time + timedelta(minutes=20 * i)
+        slot_str = slot_dt.strftime("%H:%M")
+        timestamp_key = str(int(slot_dt.timestamp()))
+        
+        # Проверяем, занят ли слот
+        if timestamp_key in scheduled_data:
+            btn_text = f"❌ {slot_str} (Занято)"
+            callback_data = "slot_busy"
+        else:
+            btn_text = f"🟢 {slot_str} МСК"
+            callback_data = f"book_slot_{timestamp_key}"
+            
+        markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
+
+    markup.add(types.InlineKeyboardButton(text="🚀 Выложить прямо сейчас", callback_data="publish_now_direct"))
+    markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
+    return markup
+
 # --- ФУНКЦИИ БЭКАПА С ЗАЩИТОЙ ОТ СПАМА ---
 
 def can_send_backup():
-    """Проверяет, отправлялся ли бэкап сегодня"""
     with file_lock:
         if not os.path.exists(BACKUP_LOG_FILE):
             return True
@@ -251,23 +290,19 @@ def can_send_backup():
             with open(BACKUP_LOG_FILE, 'r') as f:
                 last_date_str = json.load(f).get('last_backup_date')
                 if not last_date_str: return True
-                
                 last_date = datetime.strptime(last_date_str, '%Y-%m-%d').date()
                 today = datetime.now().date()
-                
                 return today > last_date
         except:
             return True
 
 def log_backup_sent():
-    """Записывает сегодняшнюю дату как дату последней отправки"""
     with file_lock:
         today_str = datetime.now().strftime('%Y-%m-%d')
         with open(BACKUP_LOG_FILE, 'w') as f:
             json.dump({'last_backup_date': today_str}, f)
 
 def send_backup_to_owner():
-    """Упаковывает все JSON базы в ZIP и отсылает владельцу"""
     try:
         backup_filename = os.path.join(DATA_DIR, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
         with zipfile.ZipFile(backup_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -289,8 +324,76 @@ def send_backup_to_owner():
 
 # --- ФОНОВЫЕ ПОТОКИ ---
 
+def scheduled_posts_checker():
+    """Фоновый поток: проверяет отложенные посты и публикует их минута в минуту"""
+    while True:
+        try:
+            scheduled_data = load_data(SCHEDULED_POSTS_FILE)
+            if isinstance(scheduled_data, dict) and scheduled_data:
+                now_ts = time.time()
+                for ts_str, p_info in list(scheduled_data.items()):
+                    if now_ts >= float(ts_str):
+                        # Время пришло, публикуем в канал!
+                        user_id = p_info['user_id']
+                        username = p_info['username']
+                        final_text = p_info['final_text']
+                        slot_num = p_info['slot_num']
+                        platform = p_info['platform']
+                        payment = p_info['payment']
+
+                        try:
+                            auto_msg = f"Здравствуйте! Я хочу у вас взять {platform} за {payment}руб! Из канала {CHANNEL_ID}"
+                            encoded_text = urllib.parse.quote(auto_msg)
+                            direct_url = f"https://t.me/{username}?text={encoded_text}" if username else f"tg://user?id={user_id}"
+                            clean_bot_username = BOT_USERNAME.replace('@', '')
+
+                            published_msg = bot.send_message(CHANNEL_ID, final_text)
+                            
+                            markup = types.InlineKeyboardMarkup(row_width=1)
+                            markup.add(
+                                types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
+                                types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
+                                types.InlineKeyboardButton(text="🚨 Пожаловаться (на любого админа)", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
+                            )
+                            bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=published_msg.message_id, reply_markup=markup)
+
+                            consume_post_credit(user_id)
+                            set_cooldown(user_id)
+                            save_to_history(user_id, username, final_text)
+                            
+                            confirm_markup = types.InlineKeyboardMarkup()
+                            confirm_markup.add(types.InlineKeyboardButton(text="📱 Главное меню", callback_data="main_menu"))
+
+                            confirm_msg = bot.send_message(
+                                user_id,
+                                f"🚀 **Ваш забронированный слот #{slot_num} успешно опубликован в канале!**\n\n"
+                                "📌 **Как закрыть пост:** Ответьте `/close` на уведомление.",
+                                parse_mode="Markdown",
+                                reply_markup=confirm_markup
+                            )
+
+                            posts_data = load_data(POSTS_FILE)
+                            posts_data[str(published_msg.message_id)] = {
+                                "user_id": user_id,
+                                "created_at": time.time(),
+                                "confirm_msg_id": confirm_msg.message_id,
+                                "platform": platform,
+                                "payment": payment,
+                                "slot_num": f"СЛОТ-{slot_num}"
+                            }
+                            save_data(POSTS_FILE, posts_data)
+
+                        except Exception as e:
+                            print(f"Ошибка автоотправки забронированного поста: {e}")
+
+                        # Удаляем из расписания
+                        del scheduled_data[ts_str]
+                        save_data(SCHEDULED_POSTS_FILE, scheduled_data)
+        except Exception as e:
+            print(f"Ошибка потока расписания: {e}")
+        time.sleep(10)
+
 def auto_close_checker():
-    """Закрывает посты в канале спустя 2 часа"""
     while True:
         try:
             posts_data = load_data(POSTS_FILE)
@@ -308,7 +411,6 @@ def auto_close_checker():
         time.sleep(15)
 
 def check_expiring_subscriptions_and_cooldowns():
-    """Следит за таймером подписок и сбросом КД"""
     while True:
         try:
             users = load_data(DB_FILE)
@@ -354,20 +456,17 @@ def check_expiring_subscriptions_and_cooldowns():
         time.sleep(30)
 
 def backup_scheduler():
-    """Фоновый поток: авто-бэкап 1 раз в сутки (с защитой от спама)"""
     time.sleep(10)
     while True:
         try:
             if can_send_backup():
                 send_backup_to_owner()
                 log_backup_sent()
-                print(f"[{datetime.now()}] Авто-бэкап успешно отправлен.")
         except Exception as e:
             print(f"Ошибка автобэкапа: {e}")
-        time.sleep(3600)  # Проверка каждый час
+        time.sleep(3600)
 
 def quiet_hours_channel_announcer():
-    """Фоновый поток: публикует ночные и утренние открытки в канал по МСК"""
     tz = pytz.timezone('Europe/Moscow')
     night_posted = False
     morning_posted = False
@@ -377,7 +476,6 @@ def quiet_hours_channel_announcer():
             now = datetime.now(tz)
             settings = load_settings()
 
-            # --- НОЧНОЙ ПОСТ (В 00:00 МСК) ---
             if now.hour == 0 and now.minute == 0 and not night_posted:
                 text_night = (
                     "🌙 **Канал уходит на ночной перерыв!**\n\n"
@@ -392,7 +490,6 @@ def quiet_hours_channel_announcer():
                     bot.send_message(CHANNEL_ID, text_night, parse_mode="Markdown")
                 night_posted, morning_posted = True, False
 
-            # --- УТРЕННИЙ ПОСТ (В 10:00 МСК) ---
             elif now.hour == 10 and now.minute == 0 and not morning_posted:
                 text_morning = (
                     "☀️ **Доброе утро! Канал проснулся!**\n\n"
@@ -458,7 +555,6 @@ def get_admin_help_text():
         "Пришли картинку в ЛС с подписью `/set_night` или `/set_morning`"
     )
 
-# --- ТЕКСТ ЖАЛОБЫ ---
 REPORT_TEXT = (
     "🚨 **Оформление жалобы на скам:**\n\n"
     "Отправь в ответ **ОДНИМ СООБЩЕНИЕМ**:\n"
@@ -664,8 +760,6 @@ def show_history(message):
         text += f"🕒 [{item['timestamp']}] {user_str}\n💬 {item['text'][:80]}...\n---\n"
     bot.reply_to(message, text)
 
-# --- РУЧНОЕ ЗАКРЫТИЕ ПОСТА ---
-
 @bot.message_handler(commands=['close'])
 def close_user_post(message):
     user_id = message.from_user.id
@@ -700,11 +794,8 @@ def close_user_post(message):
     else:
         bot.reply_to(message, "❌ Активный пост не найден.")
 
-# --- ОБРАБОТКА ФАЙЛОВ: ВОССТАНОВЛЕНИЕ И КАРТИНКИ ТИХОГО ЧАСА ---
-
 @bot.message_handler(content_types=['document'])
 def handle_restore_backup(message):
-    """Прием .zip бэкапа для восстановления базы"""
     if not is_owner(message.from_user.id): return
     if not message.document.file_name.endswith('.zip'):
         bot.reply_to(message, "❌ Пришлите .zip архив базы данных.")
@@ -727,9 +818,7 @@ def handle_restore_backup(message):
 
 @bot.message_handler(content_types=['photo'], func=lambda m: m.caption in ['/set_night', '/set_morning'])
 def set_scheduled_photos(message):
-    """Установка картинок для авто-постов в канал"""
     if not is_owner(message.from_user.id): return
-    
     settings = load_settings()
     photo_id = message.photo[-1].file_id
 
@@ -751,7 +840,6 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "⛔ Вы заблокированы!", show_alert=True)
         return
 
-    # 1. ОБРАБОТКА СПАМ-БЛОКА ИЗ КАНАЛА
     if call.data.startswith("spamblock_"):
         bot.answer_callback_query(call.id, "Запрос отправлен заказчику!", show_alert=True)
         msg_id = call.data.replace("spamblock_", "")
@@ -776,23 +864,88 @@ def callback_handler(call):
                 )
                 markup = types.InlineKeyboardMarkup()
                 markup.add(types.InlineKeyboardButton(text="💬 Написать исполнителю", url=exec_link))
-                
                 bot.send_message(creator_id, alert_text, parse_mode="Markdown", reply_markup=markup)
             except Exception as e:
                 print(f"Ошибка отправки уведомления: {e}")
         return
 
-    # 2. ПОДТВЕРЖДЕНИЕ И ПУБЛИКАЦИЯ ПОСТА (С ПРОВЕРКОЙ ТИХОГО ЧАСА)
+    # ВЫБОР: ВЫЛОЖИТЬ ПРЯМО СЕЙЧАС ИЛИ ЗАБРОНИРОВАТЬ ВРЕМЯ
     if call.data == "confirm_publish":
         bot.answer_callback_query(call.id)
+        if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
+            bot.send_message(call.message.chat.id, "❌ Ошибка. Начните создание заново.")
+            return
+
+        choice_markup = types.InlineKeyboardMarkup(row_width=1)
+        choice_markup.add(
+            types.InlineKeyboardButton(text="⚡ Выложить прямо сейчас", callback_data="publish_now_direct"),
+            types.InlineKeyboardButton(text="⏱ Забронировать время по МСК", callback_data="show_booking_slots"),
+            types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish")
+        )
+        bot.edit_message_text(
+            "🚀 **Как вы хотите опубликовать ваш пост?**\n\nВыберите вариант ниже:",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=choice_markup,
+            parse_mode="Markdown"
+        )
+
+    # ПОКАЗАТЬ СЛОТЫ БРОНИРОВАНИЯ
+    elif call.data == "show_booking_slots":
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "⏱ **Выберите время публикации по МСК (шаг 20 минут):**\n\nСлот забронируется автоматически, и пост улетит в канал точно в указанное время.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=get_available_slots_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    elif call.data == "slot_busy":
+        bot.answer_callback_query(call.id, "❌ Этот временной слот уже занят другим пользователем. Выберите другое время!", show_alert=True)
+
+    elif call.data.startswith("book_slot_"):
+        bot.answer_callback_query(call.id)
+        timestamp_key = call.data.replace("book_slot_", "")
         
-        # ПРОВЕРКА ТИХОГО ЧАСА (С 00:00 ДО 10:00 МСК)
+        if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
+            bot.send_message(call.message.chat.id, "❌ Ошибка данных. Начните заново.")
+            return
+
+        c_data = user_creation_data.pop(user_id)
+        
+        scheduled_data = load_data(SCHEDULED_POSTS_FILE)
+        if not isinstance(scheduled_data, dict):
+            scheduled_data = {}
+            
+        scheduled_data[timestamp_key] = {
+            "user_id": user_id,
+            "username": call.from_user.username,
+            "final_text": c_data['final_text'],
+            "slot_num": c_data['slot_num'],
+            "platform": c_data['platform'],
+            "payment": c_data['payment']
+        }
+        save_data(SCHEDULED_POSTS_FILE, scheduled_data)
+
+        dt_formatted = datetime.fromtimestamp(float(timestamp_key), pytz.timezone('Europe/Moscow')).strftime('%H:%M МСК')
+        
+        bot.edit_message_text(
+            f"✅ **Слот успешно забронирован на {dt_formatted}!**\n\nБот автоматически опубликует ваш пост в указанное время минута в минуту.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=get_back_keyboard(),
+            parse_mode="Markdown"
+        )
+
+    # ПРЯМАЯ ПУБЛИКАЦИЯ
+    elif call.data == "publish_now_direct":
+        bot.answer_callback_query(call.id)
+        
         if is_quiet_hours():
             bot.send_message(
                 call.message.chat.id,
-                "🌙 **На канале сон час!**\n\n"
-                "С 00:00 до 10:00 МСК выкладка новых постов приостановлена, чтобы не тревожить пользователей ночными уведомлениями.\n\n"
-                "Попробуйте выложить слот после 10:00 утра! ☀️",
+                "🌙 **На канале сон час!**\n\nС 00:00 до 10:00 МСК выкладка новых постов приостановлена. Воспользуйтесь бронированием или попробуйте после 10:00 утра! ☀️",
                 parse_mode="Markdown"
             )
             return
@@ -867,13 +1020,10 @@ def callback_handler(call):
     elif call.data == "start_create_post" or call.data == "edit_publish":
         bot.answer_callback_query(call.id)
         
-        # Предварительная проверка Тихого часа перед началом создания
         if is_quiet_hours():
             bot.send_message(
                 call.message.chat.id,
-                "🌙 **На канале сон час!**\n\n"
-                "С 00:00 до 10:00 МСК выкладка новых постов приостановлена, чтобы не тревожить пользователей ночными уведомлениями.\n\n"
-                "Попробуйте выложить слот после 10:00 утра! ☀️",
+                "🌙 **На канале сон час!**\n\nС 00:00 до 10:00 МСК выкладка новых постов приостановлена. Попробуйте выложить слот после 10:00 утра! ☀️",
                 parse_mode="Markdown"
             )
             return
@@ -890,7 +1040,7 @@ def callback_handler(call):
             return
 
         user_creation_data[user_id] = {'step': 1}
-        bot.send_message(call.message.chat.id, "📌 **Шаг 1 из 3:**\nВведите площадоку (например: *Яндекс Карты, Авито, Пушкинская карта*):", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "📌 **Шаг 1 из 3:**\nВведите площадку (например: *Яндекс Карты, Авито, Пушкинская карта*):", parse_mode="Markdown")
 
     elif call.data == "cancel_publish":
         bot.answer_callback_query(call.id, "Отменено.")
@@ -955,7 +1105,6 @@ def send_welcome(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
     
-    # ПАРСИНГ ПЕРЕХОДА ИЗ КАНАЛА ПО КНОПКЕ "ПОЖАЛОВАТЬСЯ"
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("report_"):
         slot_num = args[1].replace("report_", "")
@@ -982,7 +1131,6 @@ def handle_inputs(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
 
-    # Приём пруфов для жалобы
     if user_states.get(user_id) == "waiting_for_report":
         del user_states[user_id]
         bot.reply_to(message, "✅ **Ваша жалоба принята и отправлена администратору на рассмотрение!**", parse_mode="Markdown")
@@ -998,12 +1146,10 @@ def handle_inputs(message):
                 print(f"Ошибка пересылки жалобы админу: {e}")
         return
 
-    # ПОШАГОВЫЙ КОНСТРУКТОР ПОСТА
     if user_id in user_creation_data:
         step = user_creation_data[user_id].get('step', 1)
         text = message.text or message.caption or ""
 
-        # Проверка на ссылки и рекламу
         if "@" in text or "t.me" in text.lower() or "http" in text.lower():
             bot.reply_to(message, "❌ **Ошибка!** Ссылки и юзернеймы запрещены. Введите заново:")
             return
@@ -1065,9 +1211,10 @@ threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions_and_cooldowns, daemon=True).start()
 threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
+threading.Thread(target=scheduled_posts_checker, daemon=True).start() # Фоновый поток отправки брони
 
 if __name__ == '__main__':
-    print("Бот запущен со всеми функциями, исправленным бэкапом и Тихим часом...")
+    print("Бот запущен со всеми функциями, бронированием времени и автоотправкой...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
