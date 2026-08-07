@@ -236,7 +236,7 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ С КНОПКОЙ ОБНОВЛЕНИЯ ---
+# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ (Строго до 1 часа вперед и сон-час 00:00 - 10:00) ---
 def get_available_slots_keyboard(user_id):
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
@@ -250,20 +250,28 @@ def get_available_slots_keyboard(user_id):
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     
+    # Сон-час: если сейчас ночь (от 00:00 до 10:00), то ближайшие доступные слоты начинаются с 10:00 утра
     if 0 <= now.hour < 10:
         start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
-        end_dt = now.replace(hour=11, minute=0, second=0, microsecond=0)
     else:
+        # Округляем до ближайших 20 минут вверх
         minute = now.minute
         rem = minute % 20
         add_min = 20 - rem if rem != 0 else 20
         start_dt = now + timedelta(minutes=add_min)
         start_dt = start_dt.replace(second=0, microsecond=0)
-        end_dt = start_dt + timedelta(hours=2)
+
+    # Максимум разрешаем бронировать строго на 1 час вперед от текущего времени (максимум 4 слота по 20 минут)
+    max_end_dt = start_dt + timedelta(hours=1)
 
     slot_dt = start_dt
     slots_count = 0
-    while slot_dt <= end_dt and slots_count < 8:
+    while slot_dt <= max_end_dt and slots_count < 4:
+        # Если слот выпадает на период ночного сон-часа (00:00 - 10:00)
+        if 0 <= slot_dt.hour < 10:
+            slot_dt += timedelta(minutes=20)
+            continue
+
         slot_str = slot_dt.strftime("%H:%M")
         timestamp_key = str(int(slot_dt.timestamp()))
         slot_timestamp = slot_dt.timestamp()
@@ -282,7 +290,6 @@ def get_available_slots_keyboard(user_id):
         markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
         slot_dt += timedelta(minutes=20)
 
-    # Кнопка обновления времени прямо в сетке бронирования
     markup.add(types.InlineKeyboardButton(text="🔄 Обновить слоты", callback_data="refresh_slots"))
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
     return markup
@@ -366,7 +373,6 @@ def scheduled_posts_checker():
                             set_cooldown(user_id)
                             save_to_history(user_id, username, final_text)
                             
-                            # Сохраняем шаблон в память для быстрого повтора
                             user_creation_data[user_id] = {
                                 'platform': platform,
                                 'payment': payment,
@@ -536,6 +542,7 @@ def get_main_menu_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(text="📝 Выставить пост", callback_data="start_create_post"),
+        types.InlineKeyboardButton(text="📅 Свободное время / Бронь", callback_data="open_slots_menu"),
         types.InlineKeyboardButton(text="📖 Правила", callback_data="show_rules"),
         types.InlineKeyboardButton(text="⏳ Мой профиль / КД", callback_data="my_profile"),
         types.InlineKeyboardButton(text="📅 Мои брони", callback_data="my_scheduled_posts"),
@@ -898,6 +905,27 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
+    elif call.data == "open_slots_menu":
+        bot.answer_callback_query(call.id)
+        if not check_channel_subscription(user_id):
+            bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
+            return
+        if not is_user_active(user_id):
+            bot.send_message(call.message.chat.id, f"⛔ У вас нет активного доступа.\nВаш ID: `{user_id}`", parse_mode="Markdown")
+            return
+        cd = get_cooldown_left(user_id)
+        if cd > 0:
+            bot.send_message(call.message.chat.id, f"⏳ Кулдаун еще **{format_time(cd)}**.")
+            return
+
+        bot.edit_message_text(
+            "⏱ **Свободное время / Бронь (шаг 20 минут):**\n\nВыберите доступный слот для публикации:",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=get_available_slots_keyboard(user_id),
+            parse_mode="Markdown"
+        )
+
     elif call.data == "refresh_slots":
         bot.answer_callback_query(call.id, "🔄 Слот-сетка обновлена!")
         try:
@@ -919,8 +947,15 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
         timestamp_key = call.data.replace("book_slot_", "")
         
+        # Если юзер зашел через кнопку "Свободное время", но у него нет сохраненного текста поста — перенаправляем на создание поста
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
-            bot.send_message(call.message.chat.id, "❌ Ошибка данных. Начните заново.")
+            bot.edit_message_text(
+                "⚠️ У вас не заполнен текст поста!\nСначала создайте задание через **«📝 Выставить пост»**, а затем выберите время.",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
             return
 
         c_data = user_creation_data[user_id]
@@ -1047,11 +1082,9 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, "❌ Не найден сохраненный прошлый пост. Нажмите «📝 Выставить пост».", reply_markup=get_back_keyboard())
             return
 
-        # Сгенерируем новый номер слота для повторенного поста
         slot_num = get_next_slot_id()
         c_data = user_creation_data[user_id]
         
-        # Обновим номер слота в тексте
         platform = c_data.get('platform', '')
         payment = c_data.get('payment', '')
         desc = c_data.get('desc', '')
@@ -1068,6 +1101,7 @@ def callback_handler(call):
         preview_markup = types.InlineKeyboardMarkup(row_width=1)
         preview_markup.add(
             types.InlineKeyboardButton(text="⏱ Забронировать время по МСК", callback_data="confirm_publish"),
+            types.InlineKeyboardButton(text="🔄 Повторить прошлый пост", callback_data="repeat_last_post"),
             types.InlineKeyboardButton(text="✏️ Редактировать", callback_data="start_create_post"),
             types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish")
         )
@@ -1232,6 +1266,7 @@ def handle_inputs(message):
             preview_markup = types.InlineKeyboardMarkup(row_width=1)
             preview_markup.add(
                 types.InlineKeyboardButton(text="⏱ Забронировать время по МСК", callback_data="confirm_publish"),
+                types.InlineKeyboardButton(text="🔄 Повторить прошлый пост", callback_data="repeat_last_post"),
                 types.InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_publish"),
                 types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish")
             )
@@ -1251,7 +1286,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен с кнопкой обновления времени и стабильным повтором постов...")
+    print("Бот запущен с исправленным ночным сон-часом, ограничением сетки до 1 часа и меню бронирования...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
