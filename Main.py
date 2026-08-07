@@ -319,6 +319,16 @@ def get_admin_help_text():
         "📜 `/history` — История публикаций\n"
     )
 
+# --- ТЕКСТ ЖАЛОБЫ ---
+REPORT_TEXT = (
+    "🚨 **Оформление жалобы на скам:**\n\n"
+    "Отправь в ответ **ОДНИМ СООБЩЕНИЕМ**:\n"
+    "1. Юзернейм/ID заказчика или номер слота.\n"
+    "2. Скриншот вашей работы.\n"
+    "3. Скриншот переписки с отказом оплаты.\n\n"
+    "👇 **Ждём сообщение ниже:** (для отмены /cancel)"
+)
+
 # --- АДМИН-КОМАНДЫ ---
 
 @bot.message_handler(commands=['adminhelp'])
@@ -604,13 +614,16 @@ def callback_handler(call):
             encoded_text = urllib.parse.quote(auto_msg)
             
             direct_url = f"https://t.me/{username}?text={encoded_text}" if username else f"tg://user?id={user_id}"
+            clean_bot_username = BOT_USERNAME.replace('@', '')
 
             published_msg = bot.send_message(CHANNEL_ID, final_text)
             
+            # КЛАВИАТУРА ПОД ПОСТОМ В КАНАЛЕ (ВКЛЮЧАЕТ КНОПКУ ЖАЛОБЫ ДЛЯ ВСЕХ)
             markup = types.InlineKeyboardMarkup(row_width=1)
             markup.add(
                 types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
-                types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}")
+                types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
+                types.InlineKeyboardButton(text="🚨 Пожаловаться (на любого админа)", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
             )
             bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=published_msg.message_id, reply_markup=markup)
 
@@ -677,16 +690,7 @@ def callback_handler(call):
     elif call.data == "report_scam":
         bot.answer_callback_query(call.id)
         user_states[user_id] = "waiting_for_report"
-        bot.send_message(
-            call.message.chat.id,
-            "🚨 **Оформление жалобы на скам:**\n\n"
-            "Отправь в ответ **ОДНИМ СООБЩЕНИЕМ**:\n"
-            "1. Юзернейм/ID заказчика или номер слота.\n"
-            "2. Скриншот вашей работы.\n"
-            "3. Скриншот переписки с отказом оплаты.\n\n"
-            "👇 *Ждём сообщение ниже:* (для отмены /cancel)",
-            parse_mode="Markdown"
-        )
+        bot.send_message(call.message.chat.id, REPORT_TEXT, parse_mode="Markdown")
 
     elif call.data == "main_menu":
         bot.answer_callback_query(call.id)
@@ -740,6 +744,25 @@ def handle_menu_button(message):
 def send_welcome(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
+    
+    # ПАРСИНГ ПЕРЕХОДА ИЗ КАНАЛА ПО КНОПКЕ "ПОЖАЛОВАТЬСЯ" (/start report_1001)
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("report_"):
+        slot_num = args[1].replace("report_", "")
+        user_states[user_id] = "waiting_for_report"
+        
+        custom_report_text = (
+            f"🚨 **Оформление жалобы на скам (Слот #{slot_num}):**\n\n"
+            "Отправь в ответ **ОДНИМ СООБЩЕНИЕМ**:\n"
+            "1. Юзернейм/ID заказчика или номер слота.\n"
+            "2. Скриншот вашей работы.\n"
+            "3. Скриншот переписки с отказом оплаты.\n\n"
+            "👇 **Ждём сообщение ниже:** (для отмены /cancel)"
+        )
+        bot.send_message(message.chat.id, custom_report_text, parse_mode="Markdown")
+        bot.send_message(message.chat.id, "Меню закреплено ниже.", reply_markup=get_persistent_keyboard())
+        return
+
     bot.reply_to(message, "👋 Добро пожаловать!", reply_markup=get_main_menu_keyboard(user_id))
     bot.send_message(message.chat.id, "Меню закреплено ниже.", reply_markup=get_persistent_keyboard())
 
@@ -749,15 +772,20 @@ def handle_inputs(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
 
-    # Приём пруфов для жалобы
+    # Приём пруфов для жалобы (ДОСТУПНО ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ)
     if user_states.get(user_id) == "waiting_for_report":
         del user_states[user_id]
-        bot.reply_to(message, "✅ **Жалоба принята!** Администрация проверит доказательства.")
+        bot.reply_to(message, "✅ **Ваша жалоба принята и отправлена администратору на рассмотрение!**", parse_mode="Markdown")
+        
+        username_str = f"@{message.from_user.username}" if message.from_user.username else f"ID {user_id}"
+        admin_alert = f"🚨 **НОВАЯ ЖАЛОБА НА СКАМ** от {username_str} (`{user_id}`):"
+        
         for admin_id in OWNER_ID:
             try:
-                bot.send_message(admin_id, f"🚨 **ЖАЛОБА НА СКАМ** от @{message.from_user.username} (`{user_id}`):")
+                bot.send_message(admin_id, admin_alert, parse_mode="Markdown")
                 bot.forward_message(admin_id, message.chat.id, message.message_id)
-            except: pass
+            except Exception as e:
+                print(f"Ошибка пересылки жалобы админу: {e}")
         return
 
     # ПОШАГОВЫЙ КОНСТРУКТОР ПОСТА
