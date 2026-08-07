@@ -241,9 +241,9 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ БРОНИРОВАНИЯ ---
-def get_available_slots_keyboard():
-    """Генерирует слоты времени с шагом 20 минут (ночью с 00:00 до 10:00 доступны слоты с 10:00 до 11:00, днем — на 1 час вперед)"""
+# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ БРОНИРОВАНИЯ С УЧЕТОМ КД ---
+def get_available_slots_keyboard(user_id):
+    """Генерирует слоты времени с шагом 20 минут с учетом персонального кулдауна пользователя."""
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
     
@@ -251,42 +251,50 @@ def get_available_slots_keyboard():
     if not isinstance(scheduled_data, dict):
         scheduled_data = {}
 
+    # Узнаем, сколько секунд кулдауна осталось у юзера
+    cd_left = get_cooldown_left(user_id)
+    
+    # Минимальное время, с которого можно бронировать (текущее время + оставшийся КД)
+    earliest_available_time = now.timestamp() + cd_left
+
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    # Если сейчас ночь (сончас с 00:00 до 10:00), разрешаем бронировать утренние слоты с 10:00 до 11:00
+    # Если сейчас ночь (сончас с 00:00 до 10:00), утренние слоты начинаются с 10:00
     if 0 <= now.hour < 10:
         start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
         end_dt = now.replace(hour=11, minute=0, second=0, microsecond=0)
     else:
-        # Дневное время: от следующего округленного слота до (сейчас + 1 час)
+        # Округляем текущее время вперед до ближайших 20 минут
         minute = now.minute
         rem = minute % 20
         add_min = 20 - rem if rem != 0 else 20
         start_dt = now + timedelta(minutes=add_min)
         start_dt = start_dt.replace(second=0, microsecond=0)
-        end_dt = now + timedelta(hours=1)
+        end_dt = start_dt + timedelta(hours=2) # Показываем выбор на 2 часа вперед
 
     slot_dt = start_dt
     slots_count = 0
-    while slot_dt <= end_dt and slots_count < 6:
+    while slot_dt <= end_dt and slots_count < 8:
         slot_str = slot_dt.strftime("%H:%M")
         timestamp_key = str(int(slot_dt.timestamp()))
+        slot_timestamp = slot_dt.timestamp()
         
-        # Днем показываем только те слоты, которые еще не наступили
-        if 0 <= now.hour < 10 or slot_dt > now:
-            if timestamp_key in scheduled_data:
-                btn_text = f"❌ {slot_str} (Занято)"
-                callback_data = "slot_busy"
-            else:
-                btn_text = f"🟢 {slot_str} МСК"
-                callback_data = f"book_slot_{timestamp_key}"
-                
-            markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
+        # Проверяем: занят ли слот кем-то другим ИЛИ попадает ли он под кулдаун этого юзера
+        if timestamp_key in scheduled_data:
+            btn_text = f"❌ {slot_str} (Занято)"
+            callback_data = "slot_busy"
+        elif slot_timestamp < earliest_available_time:
+            # Слот выпадает на время кулдауна
+            btn_text = f"⏳ {slot_str} (КД)"
+            callback_data = "slot_cooldown_active"
+        else:
+            btn_text = f"🟢 {slot_str} МСК"
+            callback_data = f"book_slot_{timestamp_key}"
             slots_count += 1
             
+        markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
         slot_dt += timedelta(minutes=20)
 
-    markup.add(types.InlineKeyboardButton(text="🚀 Выложить прямо сейчас", callback_data="publish_now_direct"))
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
     return markup
 
@@ -370,7 +378,11 @@ def scheduled_posts_checker():
                             set_cooldown(user_id)
                             save_to_history(user_id, username, final_text)
                             
-                            confirm_markup = types.InlineKeyboardMarkup()
+                            confirm_markup = types.InlineKeyboardMarkup(row_width=2)
+                            confirm_markup.add(
+                                types.InlineKeyboardButton(text="🔄 Повторить пост", callback_data="start_create_post"),
+                                types.InlineKeyboardButton(text="📝 Новый пост", callback_data="start_create_post")
+                            )
                             confirm_markup.add(types.InlineKeyboardButton(text="📱 Главное меню", callback_data="main_menu"))
 
                             confirm_msg = bot.send_message(
@@ -898,19 +910,22 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # ПОКАЗАТЬ СЛОТЫ БРОНИРОВАНИЯ
+    # ПОКАЗАТЬ СЛОТЫ БРОНИРОВАНИЯ С УЧЕТОМ КД ЮЗЕРА
     elif call.data == "show_booking_slots":
         bot.answer_callback_query(call.id)
         bot.edit_message_text(
             "⏱ **Выберите время публикации по МСК (шаг 20 минут):**\n\nСлот забронируется автоматически, и пост улетит в канал точно в указанное время.",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            reply_markup=get_available_slots_keyboard(),
+            reply_markup=get_available_slots_keyboard(user_id),
             parse_mode="Markdown"
         )
 
     elif call.data == "slot_busy":
         bot.answer_callback_query(call.id, "❌ Этот временной слот уже занят другим пользователем. Выберите другое время!", show_alert=True)
+
+    elif call.data == "slot_cooldown_active":
+        bot.answer_callback_query(call.id, "⏳ Этот слот попадает под ваш активный кулдаун (2.5 часа). Выберите более позднее время!", show_alert=True)
 
     elif call.data.startswith("book_slot_"):
         bot.answer_callback_query(call.id)
@@ -990,7 +1005,11 @@ def callback_handler(call):
             set_cooldown(user_id)
             save_to_history(user_id, username, final_text)
             
-            confirm_markup = types.InlineKeyboardMarkup()
+            confirm_markup = types.InlineKeyboardMarkup(row_width=2)
+            confirm_markup.add(
+                types.InlineKeyboardButton(text="🔄 Повторить пост", callback_data="start_create_post"),
+                types.InlineKeyboardButton(text="📝 Новый пост", callback_data="start_create_post")
+            )
             confirm_markup.add(types.InlineKeyboardButton(text="📱 Главное меню", callback_data="main_menu"))
 
             confirm_msg = bot.send_message(
@@ -1214,7 +1233,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен со всеми функциями, бронированием времени и автоотправкой...")
+    print("Бот запущен со всеми функциями, бронированием времени с учетом КД и автоотправкой...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
