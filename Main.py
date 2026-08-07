@@ -1,12 +1,14 @@
-import telebot
-from telebot import types
-import threading
-import time
-import json
 import os
 import re
-from datetime import datetime
+import json
+import time
+import pytz
+import zipfile
+import telebot
+import threading
 import urllib.parse
+from datetime import datetime
+from telebot import types
 
 # --- ОСНОВНЫЕ НАСТРОЙКИ ПОД ТВОЙ КАНАЛ И БОТА ---
 TOKEN = '8282256956:AAH-LPJFnh8HYnMHuP8-R1uQGTQ2P-_-pYk'
@@ -29,6 +31,7 @@ CD_NOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_notified.json')
 CD_PRENOTIFIED_FILE = os.path.join(DATA_DIR, 'cd_prenotified.json')
 BAN_FILE = os.path.join(DATA_DIR, 'blacklist.json')
 SLOT_COUNTER_FILE = os.path.join(DATA_DIR, 'slot_counter.json')
+SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 
 COOLDOWN_TIME = 9000    # 2.5 часа кулдаун между постами (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
@@ -60,7 +63,7 @@ RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БАЗ ДАННЫХ И НАСТРОЕК ---
 
 def load_data(filename):
     with file_lock:
@@ -81,6 +84,22 @@ def save_data(filename, data):
         except Exception as e:
             print(f"Ошибка сохранения {filename}: {e}")
 
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Ошибка чтения настроек: {e}")
+    return {"night_photo": None, "morning_photo": None}
+
+def save_settings(data):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Ошибка сохранения настроек: {e}")
+
 def get_next_slot_id():
     counter_data = load_data(SLOT_COUNTER_FILE)
     if not isinstance(counter_data, dict):
@@ -96,6 +115,12 @@ def is_banned(user_id):
 
 def is_owner(user_id):
     return user_id in OWNER_ID
+
+def is_quiet_hours():
+    """Возвращает True, если сейчас Тихий час (с 00:00 до 10:00 МСК)"""
+    tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(tz)
+    return 0 <= now.hour < 10
 
 def check_channel_subscription(user_id):
     if is_owner(user_id):
@@ -214,9 +239,33 @@ def close_post_in_channel(message_id):
         except:
             return False
 
+# --- ФУНКЦИИ БЭКАПА ---
+
+def send_backup_to_owner():
+    """Упаковывает все JSON базы в ZIP и отсылает владельцу"""
+    try:
+        backup_filename = os.path.join(DATA_DIR, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+        with zipfile.ZipFile(backup_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(DATA_DIR):
+                for file in files:
+                    if file.endswith('.json'):
+                        zipf.write(os.path.join(root, file), arcname=file)
+        
+        if OWNER_ID:
+            primary_owner = OWNER_ID[0]
+            caption = f"📦 **АВТО-БЭКАП БАЗЫ ДАННЫХ**\n📅 `{datetime.now().strftime('%d.%m.%Y %H:%M')}`"
+            with open(backup_filename, 'rb') as doc:
+                bot.send_document(primary_owner, doc, caption=caption, parse_mode="Markdown")
+        
+        if os.path.exists(backup_filename):
+            os.remove(backup_filename)
+    except Exception as e:
+        print(f"Ошибка проведения бэкапа: {e}")
+
 # --- ФОНОВЫЕ ПОТОКИ ---
 
 def auto_close_checker():
+    """Закрывает посты в канале спустя 2 часа"""
     while True:
         try:
             posts_data = load_data(POSTS_FILE)
@@ -234,6 +283,7 @@ def auto_close_checker():
         time.sleep(15)
 
 def check_expiring_subscriptions_and_cooldowns():
+    """Следит за таймером подписок и сбросом КД"""
     while True:
         try:
             users = load_data(DB_FILE)
@@ -278,6 +328,64 @@ def check_expiring_subscriptions_and_cooldowns():
             print(f"Ошибка фона: {e}")
         time.sleep(30)
 
+def backup_scheduler():
+    """Фоновый поток: отправка авто-бэкапа каждые 24 часа"""
+    time.sleep(10)
+    while True:
+        try:
+            send_backup_to_owner()
+        except Exception as e:
+            print(f"Ошибка автобэкапа: {e}")
+        time.sleep(86400)
+
+def quiet_hours_channel_announcer():
+    """Фоновый поток: публикует ночные и утренние открытки в канал по МСК"""
+    tz = pytz.timezone('Europe/Moscow')
+    night_posted = False
+    morning_posted = False
+
+    while True:
+        try:
+            now = datetime.now(tz)
+            settings = load_settings()
+
+            # --- НОЧНОЙ ПОСТ (В 00:00 МСК) ---
+            if now.hour == 0 and now.minute == 0 and not night_posted:
+                text_night = (
+                    "🌙 **Канал уходит на ночной перерыв!**\n\n"
+                    "😴 Все слоты и задания отправляются отдыхать до 10:00 утра, чтобы никому не мешать спать.\n\n"
+                    "🔔 *Включайте уведомления — ровно в 10:00 МСК канал проснется, и вас будут ждать новые свежие задания!*\n\n"
+                    "Всем хорошей ночи и отличного отдыха! 💤"
+                )
+                photo = settings.get("night_photo")
+                if photo:
+                    bot.send_photo(CHANNEL_ID, photo, caption=text_night, parse_mode="Markdown")
+                else:
+                    bot.send_message(CHANNEL_ID, text_night, parse_mode="Markdown")
+                night_posted, morning_posted = True, False
+
+            # --- УТРЕННИЙ ПОСТ (В 10:00 МСК) ---
+            elif now.hour == 10 and now.minute == 0 and not morning_posted:
+                text_morning = (
+                    "☀️ **Доброе утро! Канал проснулся!**\n\n"
+                    "🚀 Тихий час окончен — выкладка заданий снова активна!\n\n"
+                    "Заказчики уже могут отправлять новые слоты через бота. Держите уведомления включенными, чтобы успевать забирать самые выгодные варианты! 🔥\n\n"
+                    f"👉 **Выложить слот:** {BOT_USERNAME}"
+                )
+                photo = settings.get("morning_photo")
+                if photo:
+                    bot.send_photo(CHANNEL_ID, photo, caption=text_morning, parse_mode="Markdown")
+                else:
+                    bot.send_message(CHANNEL_ID, text_morning, parse_mode="Markdown")
+                morning_posted, night_posted = True, False
+
+            if now.hour == 1: night_posted = False
+            if now.hour == 11: morning_posted = False
+
+        except Exception as e:
+            print(f"Ошибка тихого часа: {e}")
+        time.sleep(30)
+
 # --- КЛАВИАТУРЫ И МЕНЮ ---
 
 def get_persistent_keyboard():
@@ -317,6 +425,9 @@ def get_admin_help_text():
         "📢 `/broadcast ТЕКСТ` — Рассылка всем\n"
         "⚡ `/uncd ID` — Сбросить кулдаун юзеру\n"
         "📜 `/history` — История публикаций\n"
+        "📦 `/backup` — Получить бэкап баз в .zip\n\n"
+        "🖼 **Настройка картинок (Тихий час):**\n"
+        "Пришли картинку в ЛС с подписью `/set_night` или `/set_morning`"
     )
 
 # --- ТЕКСТ ЖАЛОБЫ ---
@@ -335,6 +446,12 @@ REPORT_TEXT = (
 def admin_help_cmd(message):
     if not is_owner(message.from_user.id): return
     bot.reply_to(message, get_admin_help_text(), parse_mode="Markdown")
+
+@bot.message_handler(commands=['backup'])
+def manual_backup_cmd(message):
+    if not is_owner(message.from_user.id): return
+    bot.reply_to(message, "⏳ Создаю и отправляю архив базы данных...")
+    send_backup_to_owner()
 
 @bot.message_handler(commands=['ban'])
 def ban_user_cmd(message):
@@ -555,6 +672,48 @@ def close_user_post(message):
     else:
         bot.reply_to(message, "❌ Активный пост не найден.")
 
+# --- ОБРАБОТКА ФАЙЛОВ: ВОССТАНОВЛЕНИЕ И КАРТИНКИ ТИХОГО ЧАСА ---
+
+@bot.message_handler(content_types=['document'])
+def handle_restore_backup(message):
+    """Прием .zip бэкапа для восстановления базы"""
+    if not is_owner(message.from_user.id): return
+    if not message.document.file_name.endswith('.zip'):
+        bot.reply_to(message, "❌ Пришлите .zip архив базы данных.")
+        return
+
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        zip_path = os.path.join(DATA_DIR, "restore.zip")
+        
+        with open(zip_path, 'wb') as f:
+            f.write(downloaded)
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(DATA_DIR)
+        os.remove(zip_path)
+        
+        bot.reply_to(message, "✅ **База данных успешно восстановлена из архива!**", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка восстановления: {e}")
+
+@bot.message_handler(content_types=['photo'], func=lambda m: m.caption in ['/set_night', '/set_morning'])
+def set_scheduled_photos(message):
+    """Установка картинок для авто-постов в канал"""
+    if not is_owner(message.from_user.id): return
+    
+    settings = load_settings()
+    photo_id = message.photo[-1].file_id
+
+    if message.caption == '/set_night':
+        settings['night_photo'] = photo_id
+        save_settings(settings)
+        bot.reply_to(message, "🌙 **Ночная картинка успешно сохранена!**")
+    elif message.caption == '/set_morning':
+        settings['morning_photo'] = photo_id
+        save_settings(settings)
+        bot.reply_to(message, "☀️ **Утренняя картинка успешно сохранена!**")
+
 # --- ОБРАБОТКА CALLBACK-КНОПОК ---
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -595,9 +754,21 @@ def callback_handler(call):
                 print(f"Ошибка отправки уведомления: {e}")
         return
 
-    # 2. ПОДТВЕРЖДЕНИЕ И ПУБЛИКАЦИЯ ПОСТА
+    # 2. ПОДТВЕРЖДЕНИЕ И ПУБЛИКАЦИЯ ПОСТА (С ПРОВЕРКОЙ ТИХОГО ЧАСА)
     if call.data == "confirm_publish":
         bot.answer_callback_query(call.id)
+        
+        # ПРОВЕРКА ТИХОГО ЧАСА (С 00:00 ДО 10:00 МСК)
+        if is_quiet_hours():
+            bot.send_message(
+                call.message.chat.id,
+                "🌙 **На канале сон час!**\n\n"
+                "С 00:00 до 10:00 МСК выкладка новых постов приостановлена, чтобы не тревожить пользователей ночными уведомлениями.\n\n"
+                "Попробуйте выложить слот после 10:00 утра! ☀️",
+                parse_mode="Markdown"
+            )
+            return
+
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
             bot.send_message(call.message.chat.id, "❌ Ошибка. Начните создание заново.")
             return
@@ -618,7 +789,6 @@ def callback_handler(call):
 
             published_msg = bot.send_message(CHANNEL_ID, final_text)
             
-            # КЛАВИАТУРА ПОД ПОСТОМ В КАНАЛЕ (ВКЛЮЧАЕТ КНОПКУ ЖАЛОБЫ ДЛЯ ВСЕХ)
             markup = types.InlineKeyboardMarkup(row_width=1)
             markup.add(
                 types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
@@ -668,6 +838,18 @@ def callback_handler(call):
 
     elif call.data == "start_create_post" or call.data == "edit_publish":
         bot.answer_callback_query(call.id)
+        
+        # Предварительная проверка Тихого часа перед началом создания
+        if is_quiet_hours():
+            bot.send_message(
+                call.message.chat.id,
+                "🌙 **На канале сон час!**\n\n"
+                "С 00:00 до 10:00 МСК выкладка новых постов приостановлена, чтобы не тревожить пользователей ночными уведомлениями.\n\n"
+                "Попробуйте выложить слот после 10:00 утра! ☀️",
+                parse_mode="Markdown"
+            )
+            return
+
         if not check_channel_subscription(user_id):
             bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
             return
@@ -745,7 +927,7 @@ def send_welcome(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
     
-    # ПАРСИНГ ПЕРЕХОДА ИЗ КАНАЛА ПО КНОПКЕ "ПОЖАЛОВАТЬСЯ" (/start report_1001)
+    # ПАРСИНГ ПЕРЕХОДА ИЗ КАНАЛА ПО КНОПКЕ "ПОЖАЛОВАТЬСЯ"
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("report_"):
         slot_num = args[1].replace("report_", "")
@@ -772,7 +954,7 @@ def handle_inputs(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
 
-    # Приём пруфов для жалобы (ДОСТУПНО ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ)
+    # Приём пруфов для жалобы
     if user_states.get(user_id) == "waiting_for_report":
         del user_states[user_id]
         bot.reply_to(message, "✅ **Ваша жалоба принята и отправлена администратору на рассмотрение!**", parse_mode="Markdown")
@@ -814,7 +996,6 @@ def handle_inputs(message):
             bot.reply_to(message, "😀 **Шаг 3 из 3:**\nВведите подробное описание задания (что нужно сделать):", parse_mode="Markdown")
 
         elif step == 3:
-            # Проверка смысловой нагрузки описания по ключевым словам
             has_keyword = any(kw in text.lower() or kw in user_creation_data[user_id]['platform'].lower() for kw in TASK_KEYWORDS)
             if len(text) < 8 or not has_keyword:
                 bot.reply_to(message, "❌ **Слишком короткое или непонятное описание.** Напишите подробнее, что конкретно нужно сделать (отзыв, регистрация, выкуп и т.д.):")
@@ -854,9 +1035,11 @@ def handle_inputs(message):
 
 threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions_and_cooldowns, daemon=True).start()
+threading.Thread(target=backup_scheduler, daemon=True).start()
+threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен со всеми функциями и конструктором...")
+    print("Бот запущен со всеми функциями, бэкапами и Тихим часом...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
