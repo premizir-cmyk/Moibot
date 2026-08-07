@@ -7,7 +7,7 @@ import zipfile
 import telebot
 import threading
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 from telebot import types
 
 # --- ОСНОВНЫЕ НАСТРОЙКИ ПОД ТВОЙ КАНАЛ И БОТА ---
@@ -243,38 +243,48 @@ def close_post_in_channel(message_id):
 
 # --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ БРОНИРОВАНИЯ ---
 def get_available_slots_keyboard():
-    """Генерирует слоты времени с шагом 20 минут на 1 час вперед по МСК"""
+    """Генерирует слоты времени с шагом 20 минут (ночью с 00:00 до 10:00 доступны слоты с 10:00 до 11:00, днем — на 1 час вперед)"""
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
     
-    # Округляем до ближайших 20 минут вперед
-    minute = now.minute
-    rem = minute % 20
-    add_min = 20 - rem if rem != 0 else 20
-    next_slot_time = now + timedelta(minutes=add_min)
-    next_slot_time = next_slot_time.replace(second=0, microsecond=0)
-
     scheduled_data = load_data(SCHEDULED_POSTS_FILE)
     if not isinstance(scheduled_data, dict):
         scheduled_data = {}
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    # Создаем 3 слота (на 1 час вперед с шагом 20 минут)
-    for i in range(3):
-        slot_dt = next_slot_time + timedelta(minutes=20 * i)
+    # Если сейчас ночь (сончас с 00:00 до 10:00), разрешаем бронировать утренние слоты с 10:00 до 11:00
+    if 0 <= now.hour < 10:
+        start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
+        end_dt = now.replace(hour=11, minute=0, second=0, microsecond=0)
+    else:
+        # Дневное время: от следующего округленного слота до (сейчас + 1 час)
+        minute = now.minute
+        rem = minute % 20
+        add_min = 20 - rem if rem != 0 else 20
+        start_dt = now + timedelta(minutes=add_min)
+        start_dt = start_dt.replace(second=0, microsecond=0)
+        end_dt = now + timedelta(hours=1)
+
+    slot_dt = start_dt
+    slots_count = 0
+    while slot_dt <= end_dt and slots_count < 6:
         slot_str = slot_dt.strftime("%H:%M")
         timestamp_key = str(int(slot_dt.timestamp()))
         
-        # Проверяем, занят ли слот
-        if timestamp_key in scheduled_data:
-            btn_text = f"❌ {slot_str} (Занято)"
-            callback_data = "slot_busy"
-        else:
-            btn_text = f"🟢 {slot_str} МСК"
-            callback_data = f"book_slot_{timestamp_key}"
+        # Днем показываем только те слоты, которые еще не наступили
+        if 0 <= now.hour < 10 or slot_dt > now:
+            if timestamp_key in scheduled_data:
+                btn_text = f"❌ {slot_str} (Занято)"
+                callback_data = "slot_busy"
+            else:
+                btn_text = f"🟢 {slot_str} МСК"
+                callback_data = f"book_slot_{timestamp_key}"
+                
+            markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
+            slots_count += 1
             
-        markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
+        slot_dt += timedelta(minutes=20)
 
     markup.add(types.InlineKeyboardButton(text="🚀 Выложить прямо сейчас", callback_data="publish_now_direct"))
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
@@ -333,7 +343,6 @@ def scheduled_posts_checker():
                 now_ts = time.time()
                 for ts_str, p_info in list(scheduled_data.items()):
                     if now_ts >= float(ts_str):
-                        # Время пришло, публикуем в канал!
                         user_id = p_info['user_id']
                         username = p_info['username']
                         final_text = p_info['final_text']
@@ -386,7 +395,6 @@ def scheduled_posts_checker():
                         except Exception as e:
                             print(f"Ошибка автоотправки забронированного поста: {e}")
 
-                        # Удаляем из расписания
                         del scheduled_data[ts_str]
                         save_data(SCHEDULED_POSTS_FILE, scheduled_data)
         except Exception as e:
@@ -945,7 +953,7 @@ def callback_handler(call):
         if is_quiet_hours():
             bot.send_message(
                 call.message.chat.id,
-                "🌙 **На канале сон час!**\n\nС 00:00 до 10:00 МСК выкладка новых постов приостановлена. Воспользуйтесь бронированием или попробуйте после 10:00 утра! ☀️",
+                "🌙 **На канале сон час!**\n\nС 00:00 до 10:00 МСК прямая выкладка новых постов приостановлена. Воспользуйтесь бронированием утренних слотов! ☀️",
                 parse_mode="Markdown"
             )
             return
@@ -1020,14 +1028,6 @@ def callback_handler(call):
     elif call.data == "start_create_post" or call.data == "edit_publish":
         bot.answer_callback_query(call.id)
         
-        if is_quiet_hours():
-            bot.send_message(
-                call.message.chat.id,
-                "🌙 **На канале сон час!**\n\nС 00:00 до 10:00 МСК выкладка новых постов приостановлена. Попробуйте выложить слот после 10:00 утра! ☀️",
-                parse_mode="Markdown"
-            )
-            return
-
         if not check_channel_subscription(user_id):
             bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
             return
@@ -1080,7 +1080,7 @@ def callback_handler(call):
         else:
             prof_text = "⛔ У вас нет активной подписки или доступных постов."
 
-        bot.edit_message_text(prof_text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown", reply_markup=get_back_keyboard())
+        bot.edit_message_text(prof_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_back_keyboard())
 
     elif call.data == "open_admin_help":
         if is_owner(user_id):
@@ -1211,7 +1211,7 @@ threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions_and_cooldowns, daemon=True).start()
 threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
-threading.Thread(target=scheduled_posts_checker, daemon=True).start() # Фоновый поток отправки брони
+threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
     print("Бот запущен со всеми функциями, бронированием времени и автоотправкой...")
