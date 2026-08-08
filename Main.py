@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -1603,7 +1604,7 @@ def handle_inputs(message):
 
 # --- ЗАПУСК ПОТОКОВ И ПОЛЛИНГА ---
 
-threading.Thread(target=auto_close_checker, daemon=True).start()
+threading.Thred(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions_and_cooldowns, daemon=True).start()
 threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
