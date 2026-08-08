@@ -381,6 +381,35 @@ def close_post_in_channel(message_id):
         except:
             return False
 
+# --- НОВАЯ ФУНКЦИЯ: СБОР ВСЕХ ПЛАТФОРМ ИЗ БАЗЫ ---
+def get_all_global_platforms():
+    all_plats = set()
+    
+    # 1. Собираем из админских платформ
+    admin_data = load_data(ADMIN_PLATFORMS_FILE)
+    if isinstance(admin_data, dict):
+        for p_list in admin_data.values():
+            if isinstance(p_list, list):
+                for p in p_list:
+                    all_plats.add(p)
+                    
+    # 2. Собираем из истории платформ
+    history_data = load_data(PLATFORM_HISTORY_FILE)
+    if isinstance(history_data, list):
+        for item in history_data:
+            if isinstance(item, dict) and 'platform' in item:
+                all_plats.add(item['platform'])
+                
+    # 3. Собираем из активных постов и расписания
+    for file_path in [POSTS_FILE, SCHEDULED_POSTS_FILE]:
+        data = load_data(file_path)
+        if isinstance(data, dict):
+            for info in data.values():
+                if isinstance(info, dict) and 'platform' in info:
+                    all_plats.add(info['platform'])
+                    
+    return sorted(list(all_plats))
+
 # --- ГЕНЕРАЦИЯ СЛОТОВ С УЧЕТОМ ТИПА ПЛАТФОРМЫ ---
 def get_available_slots_keyboard(user_id, platform_name):
     tz = pytz.timezone('Europe/Moscow')
@@ -733,19 +762,21 @@ def get_back_keyboard():
     markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
     return markup
 
+# --- ОБНОВЛЕННАЯ СПРАВКА ВЛАДЕЛЬЦА ---
 def get_admin_help_text():
     return (
         "🛠 **ПАНЕЛЬ УПРАВЛЕНИЯ ВЛАДЕЛЬЦА:**\n\n"
-        "🟢 `/add ID ДНИ [ПОСТЫ]` — Выдать доступ\n"
-        "🔴 `/del ID` — Забрать доступ\n"
-        "⛔ `/ban ID` / `/unban ID` — Бан/Разбан\n"
-        "👤 `/user ID` — Карточка пользователя\n"
-        "📋 `/list` — Список подписок\n"
+        "➕ `/add ID дни [посты]` — Выдать доступ\n"
+        "🗑 `/del ID` — Забрать доступ\n"
+        "🚫 `/ban ID` / `/unban ID` — Бан/Разбан\n"
+        "🪪 `/user ID` — Карточка пользователя\n"
+        "👥 `/list` — Список подписчиков\n"
         "📊 `/stats` — Статистика\n"
+        "🌐 `/allplatforms` — Все платформы из базы\n"
         "📢 `/broadcast ТЕКСТ` — Рассылка\n"
-        "⚡ `/uncd ID` — Сбросить КД\n"
+        "⚡ `/uncd ID` — Сбросить КДУЛ\n"
         "📜 `/history` — История постов\n"
-        "📦 `/backup` — Бэкап в .zip"
+        "💾 `/backup` — Бэкап в .zip"
     )
 
 REPORT_TEXT = (
@@ -888,6 +919,26 @@ def stats_cmd(message):
         f"📌 Постов в истории: **{len(history)}**\n"
         f"⏳ Активных слотов сейчас: **{len(active_posts)}**"
     )
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+# --- НОВАЯ АДМИН-КОМАНДА /allplatforms ---
+@bot.message_handler(commands=['allplatforms'])
+def all_platforms_cmd(message):
+    if not is_owner(message.from_user.id):
+        return
+        
+    global_plats = get_all_global_platforms()
+    
+    if not global_plats:
+        bot.reply_to(message, "📭 В базе данных пока нет ни одной платформы.")
+        return
+        
+    text = "🌐 **ГЛОБАЛЬНЫЙ СПИСОК ВСЕХ ПЛАТФОРМ В БАЗЕ:**\n\n"
+    for idx, p in enumerate(global_plats, 1):
+        p_type = "Яндекс (1ч)" if is_yandex_platform(p) else "45-минутная"
+        text += f"{idx}. `{p}` — ({p_type})\n"
+        
+    text += f"\nВсего уникальных платформ: **{len(global_plats)}**"
     bot.reply_to(message, text, parse_mode="Markdown")
 
 @bot.message_handler(commands=['broadcast'])
@@ -1552,7 +1603,7 @@ def handle_inputs(message):
         bot.reply_to(message, "✅ **Ваша жалоба принята и отправлена администратору на рассмотрение!**", parse_mode="Markdown")
         
         username_str = f"@{message.from_user.username}" if message.from_user.username else f"ID {user_id}"
-        admin_alert = f"🚨 **НОВАЯ ЖАЛОБА НА СКАМ** от {username_str} (`{user_id}`):"
+        admin_alert = f"🚨 **НОВАЯ ЖАЛОБА НА СКAМ** от {username_str} (`{user_id}`):"
         
         for admin_id in OWNER_ID:
             try:
