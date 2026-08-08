@@ -35,7 +35,7 @@ BAN_FILE = os.path.join(DATA_DIR, 'blacklist.json')
 SLOT_COUNTER_FILE = os.path.join(DATA_DIR, 'slot_counter.json')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 BACKUP_LOG_FILE = os.path.join(DATA_DIR, 'backup_log.json')
-ADMIN_PLATFORMS_FILE = os.path.join(DATA_DIR, 'admin_platforms.json') # Файл для хранения платформ админов
+ADMIN_PLATFORMS_FILE = os.path.join(DATA_DIR, 'admin_platforms.json')
 
 COOLDOWN_TIME = 9000    # 2.5 часа общий кулдаун между постами одного юзера (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
@@ -230,21 +230,26 @@ def reset_cooldown(user_id):
         save_data(COOLDOWN_FILE, cooldowns)
 
 def normalize_platform_name(platform_text):
-    text = platform_text.lower().strip()
-    if any(w in text for w in ['яндекс браузер', 'браузер']):
+    text = platform_text.strip()
+    text_lower = text.lower()
+    
+    # Точные совпадения для известных платформ, чтобы не ломать логику
+    if any(w in text_lower for w in ['яндекс браузер', 'браузер']) and 'плюс' not in text_lower:
         return 'Яндекс Браузер'
-    if any(w in text for w in ['яндекс карты', 'карты', 'яндекс', 'yandex', 'навигатор']):
+    if any(w in text_lower for w in ['яндекс карты', 'карты', 'навигатор']) and 'плюс' not in text_lower:
         return 'Яндекс Карты'
-    if any(w in text for w in ['авито', 'avito']):
+    if text_lower in ['авито', 'avito']:
         return 'Авито'
-    if any(w in text for w in ['wb', 'wildberries', 'вайлдберриз']):
+    if text_lower in ['wb', 'wildberries', 'вайлдберриз']:
         return 'Wildberries'
-    if any(w in text for w in ['озон', 'ozon']):
+    if text_lower in ['озон', 'ozon']:
         return 'Ozon'
-    if any(w in text for w in ['гугл', 'google', 'maps']):
+    if text_lower in ['гугл', 'google', 'maps']:
         return 'Google Карты'
-    if any(w in text for w in ['2гис', '2gis']):
+    if text_lower in ['2гис', '2gis']:
         return '2ГИС'
+        
+    # Для абсолютно любых новых платформ (соцсети, Яндекс Плюс и др.) оставляем оригинальный текст с красивой заглавной буквой
     return text.capitalize()
 
 def is_yandex_platform(platform_name):
@@ -394,7 +399,7 @@ def get_available_slots_keyboard(user_id, platform_name):
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if is_yandex:
-        # Яндекс: строго по 1 часу (10:00, 11:00, 12:00...)
+        # Яндекс (Карты/Браузер): строго по 1 часу (10:00, 11:00, 12:00...)
         if now.minute == 0 and now.second == 0:
             start_dt = now
         else:
@@ -430,7 +435,7 @@ def get_available_slots_keyboard(user_id, platform_name):
             markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
             slot_dt += timedelta(hours=1)
     else:
-        # Остальные платформы (Авито и др.): по 45 минут
+        # Все остальные платформы (Авито, соцсети, Яндекс Плюс и др.): по 45 минут
         if 0 <= now.hour < 10:
             start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
         else:
@@ -1028,13 +1033,19 @@ def set_scheduled_photos(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     user_id = call.from_user.id
+    
+    # Всегда гасим «часики» загрузки на кнопке, чтобы интерфейс не зависал
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+
     if is_banned(user_id):
         bot.answer_callback_query(call.id, "⛔ Вы заблокированы!", show_alert=True)
         return
 
     if call.data.startswith("book_time_"):
         selected_time = call.data.split("_")[2]
-        bot.answer_callback_query(call.id, "Бронь подтверждена!")
         bot.edit_message_text(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
@@ -1074,14 +1085,13 @@ def callback_handler(call):
 
     # УПРАВЛЕНИЕ И ДОБАВЛЕНИЕ ПЛАТФОРМ АДМИНА
     if call.data == "manage_platforms":
-        bot.answer_callback_query(call.id)
         platforms = get_admin_platforms(user_id)
         
         markup = types.InlineKeyboardMarkup(row_width=1)
-        text = "⚙️ **Управление вашими платформами:**\n\nЗдесь отображаются добавленные вами платформы. Для Яндекс.Карты/Браузер слоты идут по 1 часу, для остальных (Авито и др.) — по 45 минут.\n\n"
+        text = "⚙️ **Управление вашими платформами:**\n\nЗдесь отображаются добавленные вами платформы. Для Яндекс.Карты/Браузер слоты идут по 1 часу, для остальных (Авито, соцсети и др.) — по 45 минут.\n\n"
         
         if platforms:
-            text.text = text + "📌 **Ваши зарегистрированные платформы:**\n"
+            text += "📌 **Ваши зарегистрированные платформы:**\n"
             for p in platforms:
                 p_type = "Яндекс (1ч)" if is_yandex_platform(p) else "Другое (45м)"
                 text += f"• **{p}** _({p_type})_\n"
@@ -1095,23 +1105,20 @@ def callback_handler(call):
         bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
     elif call.data == "add_platform_start":
-        bot.answer_callback_query(call.id)
         user_states[user_id] = "waiting_for_platform_name"
         bot.send_message(
             call.message.chat.id,
             "📝 **Напишите название своей платформы:**\n\n"
-            "Например: `Яндекс Карты`, `Авито Магазин №1`, `Wildberries`, `Яндекс Браузер` и т.д.\n"
+            "Например: `Яндекс Плюс`, `Telegram канал`, `VK сообщество`, `Авито` и т.д.\n"
             "(Для отмены отправьте `/cancel`)",
             parse_mode="Markdown"
         )
 
     elif call.data.startswith("del_plat_"):
-        bot.answer_callback_query(call.id)
         p_name = call.data.replace("del_plat_", "")
         if remove_admin_platform(user_id, p_name):
             bot.answer_callback_query(call.id, f"Платформа «{p_name}» удалена!", show_alert=True)
         
-        # Обновляем меню платформ
         platforms = get_admin_platforms(user_id)
         markup = types.InlineKeyboardMarkup(row_width=1)
         text = "⚙️ **Управление вашими платформами:**\n\n"
@@ -1130,8 +1137,6 @@ def callback_handler(call):
         bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
     elif call.data == "start_create_post":
-        bot.answer_callback_query(call.id)
-        
         if not check_channel_subscription(user_id):
             bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
             return
@@ -1143,7 +1148,6 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, f"⏳ Кулдаун еще **{format_time(cd)}**.")
             return
 
-        # ПРОВЕРКА НАЛИЧИЯ ЗАРЕГИСТРИРОВАННЫХ ПЛАТФОРМ
         my_plats = get_admin_platforms(user_id)
         if not my_plats:
             bot.send_message(
@@ -1155,7 +1159,6 @@ def callback_handler(call):
             )
             return
 
-        # Показываем админу выбор из ЕГО зарегистрированных платформ
         markup = types.InlineKeyboardMarkup(row_width=1)
         for p in my_plats:
             markup.add(types.InlineKeyboardButton(text=f"📌 {p}", callback_data=f"select_plat_{p}"))
@@ -1169,12 +1172,11 @@ def callback_handler(call):
         )
 
     elif call.data.startswith("select_plat_"):
-        bot.answer_callback_query(call.id)
         chosen_platform = call.data.replace("select_plat_", "")
         
         user_creation_data[user_id] = {
             'platform': chosen_platform,
-            'step': 2 # Переходим сразу к шагу ввода суммы, так как платформа уже выбрана из списка
+            'step': 2 
         }
         
         bot.edit_message_text(
@@ -1186,7 +1188,6 @@ def callback_handler(call):
         )
 
     elif call.data == "confirm_publish":
-        bot.answer_callback_query(call.id)
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
             bot.send_message(call.message.chat.id, "❌ Ошибка. Начните создание заново.")
             return
@@ -1217,7 +1218,6 @@ def callback_handler(call):
         )
 
     elif call.data == "open_slots_menu":
-        bot.answer_callback_query(call.id)
         if not check_channel_subscription(user_id):
             bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
             return
@@ -1261,7 +1261,6 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "⏳ Этот слот попадает под ваш активный кулдаун (2.5 часа)!", show_alert=True)
 
     elif call.data.startswith("book_slot_"):
-        bot.answer_callback_query(call.id)
         timestamp_key = call.data.replace("book_slot_", "")
         
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
@@ -1307,7 +1306,6 @@ def callback_handler(call):
         )
 
     elif call.data == "my_scheduled_posts":
-        bot.answer_callback_query(call.id)
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
         user_bookings = {ts: info for ts, info in scheduled_data.items() if info.get("user_id") == user_id}
 
@@ -1365,7 +1363,6 @@ def callback_handler(call):
         bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
     elif call.data == "repeat_last_post":
-        bot.answer_callback_query(call.id)
         if not check_channel_subscription(user_id):
             bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
             return
@@ -1412,25 +1409,23 @@ def callback_handler(call):
         )
 
     elif call.data == "cancel_publish":
-        bot.answer_callback_query(call.id, "Отменено.")
         if user_id in user_creation_data: del user_creation_data[user_id]
-        bot.delete_message(call.message.chat.id, call.message.message_id)
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except:
+            pass
 
     elif call.data == "report_scam":
-        bot.answer_callback_query(call.id)
         user_states[user_id] = "waiting_for_report"
         bot.send_message(call.message.chat.id, REPORT_TEXT, parse_mode="Markdown")
 
     elif call.data == "main_menu":
-        bot.answer_callback_query(call.id)
         bot.edit_message_text("👋 Привет! Выберите нужный раздел:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_main_menu_keyboard(user_id))
 
     elif call.data == "show_rules":
-        bot.answer_callback_query(call.id)
         bot.edit_message_text(RULES_TEXT, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown", reply_markup=get_back_keyboard())
 
     elif call.data == "my_profile":
-        bot.answer_callback_query(call.id)
         if is_owner(user_id):
             prof_text = "👑 У вас статус **Владельца** (без КД и ограничений)."
         elif is_user_active(user_id):
@@ -1453,7 +1448,6 @@ def callback_handler(call):
 
     elif call.data == "open_admin_help":
         if is_owner(user_id):
-            bot.answer_callback_query(call.id)
             bot.edit_message_text(get_admin_help_text(), chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_back_keyboard())
 
 # --- ОБРАБОТКА ТЕКСТОВЫХ ВВОДОВ И СООБЩЕНИЙ ---
@@ -1616,7 +1610,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен с разделением слотов и обязательной регистрацией платформ...")
+    print("Бот запущен с динамическим добавлением любых новых платформ...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
