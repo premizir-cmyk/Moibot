@@ -35,14 +35,14 @@ BAN_FILE = os.path.join(DATA_DIR, 'blacklist.json')
 SLOT_COUNTER_FILE = os.path.join(DATA_DIR, 'slot_counter.json')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 BACKUP_LOG_FILE = os.path.join(DATA_DIR, 'backup_log.json')
+ADMIN_PLATFORMS_FILE = os.path.join(DATA_DIR, 'admin_platforms.json') # Файл для хранения платформ админов
 
 COOLDOWN_TIME = 9000    # 2.5 часа общий кулдаун между постами одного юзера (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
 MIN_OTHER_POSTS_FOR_SAME_PLATFORM = 3  
 
-# --- НОВЫЕ ФИЛЬТРЫ И ПРОВЕРКИ ---
+# --- ФИЛЬТРЫ И ПРОВЕРКИ ---
 
-# 1. Функция для точной проверки полных фраз (исключает ложные срабатывания на общие корни вроде "яндекс")
 def check_target_phrases(text: str) -> bool:
     target_patterns = [
         r'\bяндекс\s+браузер\b',
@@ -54,7 +54,6 @@ def check_target_phrases(text: str) -> bool:
             return True
     return False
 
-# 2. Функция для выявления ссылок/упоминаний соцсетей (чтобы они корректно обрабатывались и не блокировались)
 def contains_social_media(text: str) -> bool:
     social_patterns = [
         r't\.me/\S+',
@@ -69,7 +68,6 @@ def contains_social_media(text: str) -> bool:
             return True
     return False
 
-# 3. Функция для поиска ориентировочного времени в формате ЧЧ:ММ (например, 18:40)
 def extract_time(text: str):
     time_pattern = r'\b([0-1]?[0-9]|2[0-3]):([0-5][0-9])\b'
     match = re.search(time_pattern, text)
@@ -77,11 +75,8 @@ def extract_time(text: str):
         return match.group(0)
     return None
 
-
-# Расширенный список запрещенных скам-слов (соцсети исключены из стоп-листа!)
 FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом', 'пробив', 'софт']
 
-# Ключевые слова, указывающие на РЕАЛЬНОЕ задание / слот
 TASK_KEYWORDS = [
     'отзыв', 'оценка', 'звезд', 'звёзд', 'карты', 'яндекс', 'гугл', 'авито', '2гис', 'профиль',
     'пушкинск', 'пушка', 'билет', 'мероприятие', 'баланс',
@@ -93,7 +88,6 @@ TASK_KEYWORDS = [
 
 file_lock = threading.Lock()
 
-# Хранилища временных состояний
 user_creation_data = {}  
 user_states = {}         
 
@@ -101,12 +95,12 @@ RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
 1. **Используйте пошаговый конструктор!** Запрещено указывать юзернеймы и ссылки в тексте (кроме разрешенных соцсетей).
 2. **Запрещен скам и бессмысленные задания!** 
-3. **Кулдаун:** Между постами одного автора 2.5 часа. Одинаковые платформы чередуются через каждые 3 других поста.
+3. **Кулдаун:** Между постами одного автора 2.5 часа. 
 4. **Обязательна подписка** на наш канал.
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ БАЗ ДАННЫХ И НАСТРОЕК ---
+# --- БАЗЫ ДАННЫХ И НАСТРОЙКИ ---
 
 def load_data(filename):
     with file_lock:
@@ -253,6 +247,43 @@ def normalize_platform_name(platform_text):
         return '2ГИС'
     return text.capitalize()
 
+def is_yandex_platform(platform_name):
+    norm = normalize_platform_name(platform_name)
+    return norm in ['Яндекс Карты', 'Яндекс Браузер']
+
+# --- РАБОТА С ПЛАТФОРМАМИ АДМИНОВ ---
+def get_admin_platforms(user_id):
+    data = load_data(ADMIN_PLATFORMS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    return data.get(str(user_id), [])
+
+def add_admin_platform(user_id, platform_name):
+    data = load_data(ADMIN_PLATFORMS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    str_id = str(user_id)
+    if str_id not in data:
+        data[str_id] = []
+    
+    norm_name = normalize_platform_name(platform_name)
+    if norm_name not in data[str_id]:
+        data[str_id].append(norm_name)
+        save_data(ADMIN_PLATFORMS_FILE, data)
+        return True
+    return False
+
+def remove_admin_platform(user_id, platform_name):
+    data = load_data(ADMIN_PLATFORMS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    str_id = str(user_id)
+    if str_id in data and platform_name in data[str_id]:
+        data[str_id].remove(platform_name)
+        save_data(ADMIN_PLATFORMS_FILE, data)
+        return True
+    return False
+
 def check_platform_cooldown(platform_name):
     norm_name = normalize_platform_name(platform_name)
     history = load_data(PLATFORM_HISTORY_FILE)
@@ -347,8 +378,8 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ ---
-def get_available_slots_keyboard(user_id):
+# --- ГЕНЕРАЦИЯ СЛОТОВ С УЧЕТОМ ТИПА ПЛАТФОРМЫ ---
+def get_available_slots_keyboard(user_id, platform_name):
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
     
@@ -359,54 +390,88 @@ def get_available_slots_keyboard(user_id):
     cd_left = get_cooldown_left(user_id)
     earliest_available_time = now.timestamp() + cd_left
 
+    is_yandex = is_yandex_platform(platform_name)
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    if 0 <= now.hour < 10:
-        start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
-    else:
-        minute = now.minute
-        rem = minute % 20
-        add_min = 20 - rem if rem != 0 else 20
-        start_dt = now + timedelta(minutes=add_min)
-        start_dt = start_dt.replace(second=0, microsecond=0)
-
-    max_end_dt = start_dt + timedelta(hours=1)
-
-    slot_dt = start_dt
-    slots_count = 0
-    while slot_dt <= max_end_dt and slots_count < 4:
-        if 0 <= slot_dt.hour < 10:
-            slot_dt += timedelta(minutes=20)
-            continue
-
-        slot_str = slot_dt.strftime("%H:%M")
-        timestamp_key = str(int(slot_dt.timestamp()))
-        slot_timestamp = slot_dt.timestamp()
-        
-        if timestamp_key in scheduled_data:
-            slot_info = scheduled_data[timestamp_key]
-            platform_name = slot_info.get("platform", "")
-            if platform_name:
-                btn_text = f"❌ {slot_str} ({platform_name})"
-            else:
-                btn_text = f"❌ {slot_str} (Занято)"
-            callback_data = "slot_busy"
-        elif slot_timestamp < earliest_available_time:
-            btn_text = f"⏳ {slot_str} (КД)"
-            callback_data = "slot_cooldown_active"
+    if is_yandex:
+        # Яндекс: строго по 1 часу (10:00, 11:00, 12:00...)
+        if now.minute == 0 and now.second == 0:
+            start_dt = now
         else:
-            btn_text = f"🟢 {slot_str} МСК"
-            callback_data = f"book_slot_{timestamp_key}"
-            slots_count += 1
+            start_dt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        
+        if 0 <= start_dt.hour < 10:
+            start_dt = start_dt.replace(hour=10, minute=0)
+
+        slot_dt = start_dt
+        slots_count = 0
+        while slots_count < 6:
+            if 0 <= slot_dt.hour < 10:
+                slot_dt += timedelta(hours=1)
+                continue
+
+            slot_str = slot_dt.strftime("%H:%M")
+            timestamp_key = str(int(slot_dt.timestamp()))
+            slot_timestamp = slot_dt.timestamp()
             
-        markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
-        slot_dt += timedelta(minutes=20)
+            if timestamp_key in scheduled_data:
+                slot_info = scheduled_data[timestamp_key]
+                p_name = slot_info.get("platform", "")
+                btn_text = f"❌ {slot_str} ({p_name})"
+                callback_data = "slot_busy"
+            elif slot_timestamp < earliest_available_time:
+                btn_text = f"⏳ {slot_str} (КД)"
+                callback_data = "slot_cooldown_active"
+            else:
+                btn_text = f"🟢 {slot_str} (1ч)"
+                callback_data = f"book_slot_{timestamp_key}"
+                slots_count += 1
+                
+            markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
+            slot_dt += timedelta(hours=1)
+    else:
+        # Остальные платформы (Авито и др.): по 45 минут
+        if 0 <= now.hour < 10:
+            start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
+        else:
+            minute = now.minute
+            rem = minute % 45
+            add_min = 45 - rem if rem != 0 else 45
+            start_dt = now + timedelta(minutes=add_min)
+            start_dt = start_dt.replace(second=0, microsecond=0)
+
+        slot_dt = start_dt
+        slots_count = 0
+        while slots_count < 6:
+            if 0 <= slot_dt.hour < 10:
+                slot_dt += timedelta(minutes=45)
+                continue
+
+            slot_str = slot_dt.strftime("%H:%M")
+            timestamp_key = str(int(slot_dt.timestamp()))
+            slot_timestamp = slot_dt.timestamp()
+            
+            if timestamp_key in scheduled_data:
+                slot_info = scheduled_data[timestamp_key]
+                p_name = slot_info.get("platform", "")
+                btn_text = f"❌ {slot_str} ({p_name})"
+                callback_data = "slot_busy"
+            elif slot_timestamp < earliest_available_time:
+                btn_text = f"⏳ {slot_str} (КД)"
+                callback_data = "slot_cooldown_active"
+            else:
+                btn_text = f"🟢 {slot_str} (45м)"
+                callback_data = f"book_slot_{timestamp_key}"
+                slots_count += 1
+                
+            markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
+            slot_dt += timedelta(minutes=45)
 
     markup.add(types.InlineKeyboardButton(text="🔄 Обновить слоты", callback_data="refresh_slots"))
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
     return markup
 
-# --- ФУНКЦИИ БЭКАПА ---
+# --- БЭКАПЫ И ФОНОВЫЕ ПОТОКИ ---
 
 def can_send_backup():
     with file_lock:
@@ -448,8 +513,6 @@ def send_backup_to_owner():
     except Exception as e:
         print(f"Ошибка проведения бэкапа: {e}")
 
-# --- ФОНОВЫЕ ПОТОКИ ---
-
 def scheduled_posts_checker():
     while True:
         try:
@@ -477,7 +540,7 @@ def scheduled_posts_checker():
                             markup.add(
                                 types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
                                 types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
-                                types.InlineKeyboardButton(text="🚨 Пожаловаться (на любого админа)", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
+                                types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
                             )
                             bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=published_msg.message_id, reply_markup=markup)
 
@@ -502,8 +565,7 @@ def scheduled_posts_checker():
 
                             confirm_msg = bot.send_message(
                                 user_id,
-                                f"🚀 **Ваш забронированный слот #{slot_num} успешно опубликован в канале!**\n\n"
-                                "📌 **Как закрыть пост:** Ответьте `/close` на уведомление.",
+                                f"🚀 **Ваш забронированный слот #{slot_num} успешно опубликован в канале!**",
                                 parse_mode="Markdown",
                                 reply_markup=confirm_markup
                             )
@@ -572,7 +634,7 @@ def check_expiring_subscriptions_and_cooldowns():
                 
                 if 0 < time_left <= 300 and u_id not in cd_prenotified:
                     try:
-                        bot.send_message(int(u_id), "⏳ **До окончания кулдауна осталось 5 минут!**\nМожете готовить новый слот.", parse_mode="Markdown")
+                        bot.send_message(int(u_id), "⏳ **До окончания кулдауна осталось 5 минут!**", parse_mode="Markdown")
                     except:
                         pass
                     cd_prenotified[u_id] = True
@@ -615,9 +677,8 @@ def quiet_hours_channel_announcer():
             if now.hour == 0 and now.minute < 2 and night_posted_date != today_str:
                 text_night = (
                     "🌙 **Канал уходит на ночной перерыв!**\n\n"
-                    "😴 Все слоты и задания отправляются отдыхать до 10:00 утра, чтобы никому не мешать спать.\n\n"
-                    "🔔 *Включайте уведомления — ровно в 10:00 МСК канал проснется, и вас будут ждать новые свежие задания!*\n\n"
-                    "Всем хорошей ночи и отличного отдыха! 💤"
+                    "😴 Все слоты и задания отправляются отдыхать до 10:00 утра.\n\n"
+                    f"Всем хорошей ночи! 💤"
                 )
                 photo = settings.get("night_photo")
                 if photo:
@@ -630,7 +691,6 @@ def quiet_hours_channel_announcer():
                 text_morning = (
                     "☀️ **Доброе утро! Канал проснулся!**\n\n"
                     "🚀 Тихий час окончен — выкладка заданий снова активна!\n\n"
-                    "Заказчики уже могут отправлять новые слоты через бота. Держите уведомления включенными, чтобы успевать забирать самые выгодные варианты! 🔥\n\n"
                     f"👉 **Выложить слот:** {BOT_USERNAME}"
                 )
                 photo = settings.get("morning_photo")
@@ -644,7 +704,7 @@ def quiet_hours_channel_announcer():
             print(f"Ошибка тихого часа: {e}")
         time.sleep(30)
 
-# --- КЛАВИАТУРЫ И МЕНЮ ---
+# --- МЕНЮ И КЛАВИАТУРЫ ---
 
 def get_persistent_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -655,7 +715,7 @@ def get_main_menu_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(text="📝 Выставить пост", callback_data="start_create_post"),
-        types.InlineKeyboardButton(text="📅 Свободное время / Бронь", callback_data="open_slots_menu"),
+        types.InlineKeyboardButton(text="⚙️ Мои платформы", callback_data="manage_platforms"),
         types.InlineKeyboardButton(text="📖 Правила", callback_data="show_rules"),
         types.InlineKeyboardButton(text="⏳ Мой профиль / КД", callback_data="my_profile"),
         types.InlineKeyboardButton(text="📅 Мои брони", callback_data="my_scheduled_posts"),
@@ -675,19 +735,16 @@ def get_back_keyboard():
 def get_admin_help_text():
     return (
         "🛠 **ПАНЕЛЬ УПРАВЛЕНИЯ ВЛАДЕЛЬЦА:**\n\n"
-        "🟢 `/add ID ДНИ [ПОСТЫ]` — Выдать доступ (Пример: `/add 12345 30` или `/add 12345 0 5`)\n"
-        "🔴 `/del ID` — Забрать доступ у пользователя\n"
-        "⛔ `/ban ID` — Забанить пользователя\n"
-        "🟢 `/unban ID` — Разбанить пользователя\n"
+        "🟢 `/add ID ДНИ [ПОСТЫ]` — Выдать доступ\n"
+        "🔴 `/del ID` — Забрать доступ\n"
+        "⛔ `/ban ID` / `/unban ID` — Бан/Разбан\n"
         "👤 `/user ID` — Карточка пользователя\n"
-        "📋 `/list` — Список активных подписок\n"
-        "📊 `/stats` — Статистика бота\n"
-        "📢 `/broadcast ТЕКСТ` — Рассылка всем\n"
-        "⚡ `/uncd ID` — Сбросить кулдаун юзеру\n"
-        "📜 `/history` — История публикаций\n"
-        "📦 `/backup` — Получить бэкап баз в .zip\n\n"
-        "🖼 **Настройка картинок (Тихий час):**\n"
-        "Пришли картинку в ЛС с подписью `/set_night` или `/set_morning`"
+        "📋 `/list` — Список подписок\n"
+        "📊 `/stats` — Статистика\n"
+        "📢 `/broadcast ТЕКСТ` — Рассылка\n"
+        "⚡ `/uncd ID` — Сбросить КД\n"
+        "📜 `/history` — История постов\n"
+        "📦 `/backup` — Бэкап в .zip"
     )
 
 REPORT_TEXT = (
@@ -975,7 +1032,6 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "⛔ Вы заблокированы!", show_alert=True)
         return
 
-    # Логика бронирования времени прямо из сообщений (если бот предлагает забронировать найденное время)
     if call.data.startswith("book_time_"):
         selected_time = call.data.split("_")[2]
         bot.answer_callback_query(call.id, "Бронь подтверждена!")
@@ -1016,7 +1072,120 @@ def callback_handler(call):
                 print(f"Ошибка отправки уведомления: {e}")
         return
 
-    if call.data == "confirm_publish":
+    # УПРАВЛЕНИЕ И ДОБАВЛЕНИЕ ПЛАТФОРМ АДМИНА
+    if call.data == "manage_platforms":
+        bot.answer_callback_query(call.id)
+        platforms = get_admin_platforms(user_id)
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        text = "⚙️ **Управление вашими платформами:**\n\nЗдесь отображаются добавленные вами платформы. Для Яндекс.Карты/Браузер слоты идут по 1 часу, для остальных (Авито и др.) — по 45 минут.\n\n"
+        
+        if platforms:
+            text.text = text + "📌 **Ваши зарегистрированные платформы:**\n"
+            for p in platforms:
+                p_type = "Яндекс (1ч)" if is_yandex_platform(p) else "Другое (45м)"
+                text += f"• **{p}** _({p_type})_\n"
+                markup.add(types.InlineKeyboardButton(text=f"❌ Удалить «{p}»", callback_data=f"del_plat_{p}"))
+        else:
+            text += "⚠️ У вас пока нет зарегистрированных платформ!\n"
+
+        markup.add(types.InlineKeyboardButton(text="➕ Добавить платформу", callback_data="add_platform_start"))
+        markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
+        
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+    elif call.data == "add_platform_start":
+        bot.answer_callback_query(call.id)
+        user_states[user_id] = "waiting_for_platform_name"
+        bot.send_message(
+            call.message.chat.id,
+            "📝 **Напишите название своей платформы:**\n\n"
+            "Например: `Яндекс Карты`, `Авито Магазин №1`, `Wildberries`, `Яндекс Браузер` и т.д.\n"
+            "(Для отмены отправьте `/cancel`)",
+            parse_mode="Markdown"
+        )
+
+    elif call.data.startswith("del_plat_"):
+        bot.answer_callback_query(call.id)
+        p_name = call.data.replace("del_plat_", "")
+        if remove_admin_platform(user_id, p_name):
+            bot.answer_callback_query(call.id, f"Платформа «{p_name}» удалена!", show_alert=True)
+        
+        # Обновляем меню платформ
+        platforms = get_admin_platforms(user_id)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        text = "⚙️ **Управление вашими платформами:**\n\n"
+        if platforms:
+            text += "📌 **Ваши зарегистрированные платформы:**\n"
+            for p in platforms:
+                p_type = "Яндекс (1ч)" if is_yandex_platform(p) else "Другое (45м)"
+                text += f"• **{p}** _({p_type})_\n"
+                markup.add(types.InlineKeyboardButton(text=f"❌ Удалить «{p}»", callback_data=f"del_plat_{p}"))
+        else:
+            text += "⚠️ У вас пока нет зарегистрированных платформ!\n"
+
+        markup.add(types.InlineKeyboardButton(text="➕ Добавить платформу", callback_data="add_platform_start"))
+        markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
+        
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+    elif call.data == "start_create_post":
+        bot.answer_callback_query(call.id)
+        
+        if not check_channel_subscription(user_id):
+            bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
+            return
+        if not is_user_active(user_id):
+            bot.send_message(call.message.chat.id, f"⛔ У вас нет активного доступа.\nВаш ID: `{user_id}`", parse_mode="Markdown")
+            return
+        cd = get_cooldown_left(user_id)
+        if cd > 0:
+            bot.send_message(call.message.chat.id, f"⏳ Кулдаун еще **{format_time(cd)}**.")
+            return
+
+        # ПРОВЕРКА НАЛИЧИЯ ЗАРЕГИСТРИРОВАННЫХ ПЛАТФОРМ
+        my_plats = get_admin_platforms(user_id)
+        if not my_plats:
+            bot.send_message(
+                call.message.chat.id,
+                "⚠️ **У вас не зарегистрирована ни одна платформа!**\n\n"
+                "Без добавления платформы выставить пост нельзя. Перейдите в раздел **«⚙️ Мои платформы»** и добавьте хотя бы одну.",
+                reply_markup=get_main_menu_keyboard(user_id),
+                parse_mode="Markdown"
+            )
+            return
+
+        # Показываем админу выбор из ЕГО зарегистрированных платформ
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for p in my_plats:
+            markup.add(types.InlineKeyboardButton(text=f"📌 {p}", callback_data=f"select_plat_{p}"))
+        markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
+
+        bot.send_message(
+            call.message.chat.id,
+            "📌 **Выберите платформу для нового поста из ваших сохраненных:**",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
+    elif call.data.startswith("select_plat_"):
+        bot.answer_callback_query(call.id)
+        chosen_platform = call.data.replace("select_plat_", "")
+        
+        user_creation_data[user_id] = {
+            'platform': chosen_platform,
+            'step': 2 # Переходим сразу к шагу ввода суммы, так как платформа уже выбрана из списка
+        }
+        
+        bot.edit_message_text(
+            f"✅ Выбрана платформа: **{chosen_platform}**\n\n"
+            "💵 **Шаг 2 из 3:**\nВведите сумму оплаты в рублях (например: *150* или *300 руб*):",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+
+    elif call.data == "confirm_publish":
         bot.answer_callback_query(call.id)
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
             bot.send_message(call.message.chat.id, "❌ Ошибка. Начните создание заново.")
@@ -1030,18 +1199,20 @@ def callback_handler(call):
                 call.message.chat.id, 
                 f"⏳ **Платформа «{platform_name}» сейчас находится на кулдауне!**\n"
                 f"Нужно, чтобы прошло еще **{needed_posts} поста(ов)** других платформ.\n\n"
-                f"💡 Ближайшее свободное время для этой платформы: **{time_str}**.\n"
-                "Выберите другое время в сетке или дождитесь окончания кулдауна.",
+                f"💡 Ближайшее свободное время для этой платформы: **{time_str}**.",
                 reply_markup=get_back_keyboard(),
                 parse_mode="Markdown"
             )
             return
 
+        is_yandex = is_yandex_platform(platform_name)
+        step_text = "Слот забронируется автоматически на 1 час (ровно по часам)." if is_yandex else "Слот забронируется автоматически на 45 минут."
+
         bot.edit_message_text(
-            "⏱ **Выберите время публикации по МСК (шаг 20 минут):**\n\nСлот забронируется автоматически, и пост улетит в канал точно в указанное время.",
+            f"⏱ **Выберите время публикации по МСК:**\n\n{step_text}",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            reply_markup=get_available_slots_keyboard(user_id),
+            reply_markup=get_available_slots_keyboard(user_id, platform_name),
             parse_mode="Markdown"
         )
 
@@ -1063,43 +1234,31 @@ def callback_handler(call):
             return
 
         platform_name = user_creation_data[user_id].get('platform', '')
-        is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
-        if not is_plat_ok:
-            time_str, _ = get_next_available_slot_for_platform(platform_name)
-            bot.send_message(
-                call.message.chat.id, 
-                f"⏳ **Платформа «{platform_name}» на кулдауне!**\n"
-                f"Нужно еще **{needed_posts} поста(ов)** других платформ.\n\n"
-                f"💡 Ближайшее свободное время: **{time_str}**.",
-                reply_markup=get_back_keyboard(),
-                parse_mode="Markdown"
-            )
-            return
-
         bot.edit_message_text(
-            "⏱ **Свободное время / Бронь (шаг 20 минут):**\n\nВыберите доступный слот для публикации:",
+            "⏱ **Свободное время / Бронь:**\n\nВыберите доступный слот для публикации:",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            reply_markup=get_available_slots_keyboard(user_id),
+            reply_markup=get_available_slots_keyboard(user_id, platform_name),
             parse_mode="Markdown"
         )
 
     elif call.data == "refresh_slots":
         bot.answer_callback_query(call.id, "🔄 Слот-сетка обновлена!")
         try:
+            platform_name = user_creation_data.get(user_id, {}).get('platform', 'Авито')
             bot.edit_message_reply_markup(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                reply_markup=get_available_slots_keyboard(user_id)
+                reply_markup=get_available_slots_keyboard(user_id, platform_name)
             )
         except Exception:
             pass
 
     elif call.data == "slot_busy":
-        bot.answer_callback_query(call.id, "❌ Этот временной слот уже занят другим пользователем. Выберите другое время!", show_alert=True)
+        bot.answer_callback_query(call.id, "❌ Этот временной слот уже занят другим администратором!", show_alert=True)
 
     elif call.data == "slot_cooldown_active":
-        bot.answer_callback_query(call.id, "⏳ Этот слот попадает под ваш активный кулдаун (2.5 часа). Выберите более позднее время!", show_alert=True)
+        bot.answer_callback_query(call.id, "⏳ Этот слот попадает под ваш активный кулдаун (2.5 часа)!", show_alert=True)
 
     elif call.data.startswith("book_slot_"):
         bot.answer_callback_query(call.id)
@@ -1107,7 +1266,7 @@ def callback_handler(call):
         
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
             bot.edit_message_text(
-                "⚠️ У вас не заполнен текст поста!\nСначала создайте задание через **«📝 Выставить пост»**, а затем выберите время.",
+                "⚠️ У вас не заполнен текст поста!\nСначала создайте задание через **«📝 Выставить пост»**.",
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
                 reply_markup=get_back_keyboard(),
@@ -1117,19 +1276,6 @@ def callback_handler(call):
 
         c_data = user_creation_data[user_id]
         
-        is_plat_ok, needed_posts = check_platform_cooldown(c_data['platform'])
-        if not is_plat_ok:
-            time_str, _ = get_next_available_slot_for_platform(c_data['platform'])
-            bot.edit_message_text(
-                f"❌ Ошибка: Платформа «{c_data['platform']}» на кулдауне (нужно еще {needed_posts} поста других платформ).\n\n"
-                f"💡 Занять время можно будет после: **{time_str}**.",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=get_back_keyboard(),
-                parse_mode="Markdown"
-            )
-            return
-
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
         if not isinstance(scheduled_data, dict):
             scheduled_data = {}
@@ -1149,7 +1295,7 @@ def callback_handler(call):
         success_text = (
             f"✅ **Слот успешно забронирован на {dt_formatted}!**\n\n"
             "Бот автоматически опубликует ваш пост в указанное время минута в минуту.\n\n"
-            "🔄 **Если планы поменялись:** Вы можете отменить эту бронь в любой момент до публикации через раздел **«📅 Мои брони»** в главном меню."
+            "🔄 **Если планы поменялись:** Вы можете отменить эту бронь через раздел **«📅 Мои брони»**."
         )
 
         bot.edit_message_text(
@@ -1176,7 +1322,7 @@ def callback_handler(call):
             return
 
         markup = types.InlineKeyboardMarkup(row_width=1)
-        text = "📅 **Ваши активные забронированные слоты:**\n\nНажмите на кнопку отмены под нужным слотом, чтобы снять бронь:\n"
+        text = "📅 **Ваши активные забронированные слоты:**\n\n"
         
         for ts, info in sorted(user_bookings.items(), key=lambda x: float(x[0])):
             dt_str = datetime.fromtimestamp(float(ts), pytz.timezone('Europe/Moscow')).strftime('%d.%m в %H:%M МСК')
@@ -1218,23 +1364,6 @@ def callback_handler(call):
         markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
         bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
-    elif call.data == "start_create_post" or call.data == "edit_publish":
-        bot.answer_callback_query(call.id)
-        
-        if not check_channel_subscription(user_id):
-            bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
-            return
-        if not is_user_active(user_id):
-            bot.send_message(call.message.chat.id, f"⛔ У вас нет активного доступа.\nВаш ID: `{user_id}`", parse_mode="Markdown")
-            return
-        cd = get_cooldown_left(user_id)
-        if cd > 0:
-            bot.send_message(call.message.chat.id, f"⏳ Кулдаун еще **{format_time(cd)}**.")
-            return
-
-        user_creation_data[user_id] = {'step': 1}
-        bot.send_message(call.message.chat.id, "📌 **Шаг 1 из 3:**\nВведите площадку (например: *Яндекс Браузер, Яндекс Карты, Авито*):", parse_mode="Markdown")
-
     elif call.data == "repeat_last_post":
         bot.answer_callback_query(call.id)
         if not check_channel_subscription(user_id):
@@ -1253,20 +1382,6 @@ def callback_handler(call):
             return
 
         c_data = user_creation_data[user_id]
-        
-        is_plat_ok, needed_posts = check_platform_cooldown(c_data.get('platform', ''))
-        if not is_plat_ok:
-            time_str, _ = get_next_available_slot_for_platform(c_data.get('platform', ''))
-            bot.send_message(
-                call.message.chat.id, 
-                f"⏳ **Платформа «{c_data.get('platform')}» на кулдауне!**\n"
-                f"Нужно еще **{needed_posts} поста(ов)** других платформ перед повтором.\n\n"
-                f"💡 Занять время можно будет после: **{time_str}**.",
-                reply_markup=get_back_keyboard(),
-                parse_mode="Markdown"
-            )
-            return
-
         slot_num = get_next_slot_id()
         platform = c_data.get('platform', '')
         payment = c_data.get('payment', '')
@@ -1291,7 +1406,7 @@ def callback_handler(call):
 
         bot.send_message(
             call.message.chat.id, 
-            f"👁 **ПРЕДПРОСМОТР ВАШЕГО ПОВТОРЕННОГО ПОСТА:**\n\n{final_text}\n\n-------------------\nВсе указано верно?",
+            f"👁 **ПРЕДПРОСМОТР ВАШЕГО ПОВТОРЕННОГО ПОСТА:**\n\n{final_text}\n\nВсе указано верно?",
             reply_markup=preview_markup,
             parse_mode="Markdown"
         )
@@ -1341,7 +1456,7 @@ def callback_handler(call):
             bot.answer_callback_query(call.id)
             bot.edit_message_text(get_admin_help_text(), chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_back_keyboard())
 
-# --- ПОШАГОВЫЙ ВВОД И ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ---
+# --- ОБРАБОТКА ТЕКСТОВЫХ ВВОДОВ И СООБЩЕНИЙ ---
 
 @bot.message_handler(commands=['cancel'])
 def cancel_state(message):
@@ -1387,19 +1502,36 @@ def handle_inputs(message):
 
     text = message.text or message.caption or ""
 
-    # === ИНТЕГРАЦИЯ УМНОГО ПОИСКА ВРЕМЕНИ И СОЦСЕТЕЙ В ОБЩИЙ ПОТОК СООБЩЕНИЙ ===
+    # Обработка добавления новой платформы
+    if user_states.get(user_id) == "waiting_for_platform_name":
+        del user_states[user_id]
+        platform_name = text.strip()
+        if len(platform_name) < 2:
+            bot.reply_to(message, "❌ Слишком короткое название. Напишите название платформы заново через меню «⚙️ Мои платформы».")
+            return
+            
+        add_admin_platform(user_id, platform_name)
+        bot.reply_to(
+            message,
+            f"✅ **Платформа «{normalize_platform_name(platform_name)}» успешно зарегистрирована!**\n\n"
+            "Теперь вы можете использовать её для создания постов.",
+            reply_markup=get_main_menu_keyboard(user_id),
+            parse_mode="Markdown"
+        )
+        return
+
+    # Распознавание времени в обычных сообщениях
     found_time = extract_time(text)
     has_target = check_target_phrases(text)
     has_socials = contains_social_media(text)
 
     if found_time:
-        # Если в тексте найдено время (например, 18:40), предлагаем забронировать его инлайн-кнопкой
         keyboard = types.InlineKeyboardMarkup(row_width=1)
         keyboard.add(types.InlineKeyboardButton(text=f"✅ Забронировать на {found_time}", callback_data=f"book_time_{found_time}"))
         
         resp_msg = f"⏳ Ориентировочное время: **{found_time}**."
         if has_target:
-            resp_msg += "\n✅ Обнаружен целевой запрос (Яндекс Браузер / Яндекс Карты)."
+            resp_msg += "\n✅ Обнаружен целевой запрос."
         if has_socials:
             resp_msg += "\n🌐 Обнаружена ссылка на социальную сеть."
             
@@ -1422,9 +1554,8 @@ def handle_inputs(message):
         return
 
     if user_id in user_creation_data:
-        step = user_creation_data[user_id].get('step', 1)
+        step = user_creation_data[user_id].get('step', 2)
 
-        # Проверка на запрещенные ссылки/юзернеймы, ЕСЛИ ЭТО НЕ РАЗРЕШЕННЫЕ СОЦСЕТИ
         if ("@" in text or "t.me" in text.lower() or "http" in text.lower()) and not contains_social_media(text):
             bot.reply_to(message, "❌ **Ошибка!** Ссылки и юзернеймы запрещены. Введите заново:")
             return
@@ -1434,27 +1565,7 @@ def handle_inputs(message):
                 bot.reply_to(message, f"❌ Запрещенное слово ({word}). Введите заново:")
                 return
 
-        if step == 1:
-            platform_name = text
-            
-            is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
-            if not is_plat_ok:
-                time_str, _ = get_next_available_slot_for_platform(platform_name)
-                bot.reply_to(
-                    message, 
-                    f"⏳ **Платформа «{platform_name}» сейчас на кулдауне!**\n"
-                    f"Осталось пройти **{needed_posts} поста(ов)** других платформ.\n\n"
-                    f"💡 Ориентировочно занять этот слот можно будет после: **{time_str}**.\n\n"
-                    "Введите другую площадку или отмените действие через `/cancel`:",
-                    parse_mode="Markdown"
-                )
-                return
-
-            user_creation_data[user_id]['platform'] = platform_name
-            user_creation_data[user_id]['step'] = 2
-            bot.reply_to(message, "💵 **Шаг 2 из 3:**\nВведите сумму оплаты в рублях (например: *150* или *300 руб*):", parse_mode="Markdown")
-
-        elif step == 2:
+        if step == 2:
             user_creation_data[user_id]['payment'] = text
             user_creation_data[user_id]['step'] = 3
             bot.reply_to(message, "😀 **Шаг 3 из 3:**\nВведите подробное описание задания (что нужно сделать):", parse_mode="Markdown")
@@ -1462,7 +1573,7 @@ def handle_inputs(message):
         elif step == 3:
             has_keyword = any(kw in text.lower() or kw in user_creation_data[user_id]['platform'].lower() for kw in TASK_KEYWORDS)
             if len(text) < 8 or not has_keyword:
-                bot.reply_to(message, "❌ **Слишком короткое или непонятное описание.** Напишите подробнее, что конкретно нужно сделать (отзыв, регистрация, выкуп и т.д.):")
+                bot.reply_to(message, "❌ **Слишком короткое или непонятное описание.** Напишите подробнее, что конкретно нужно сделать:")
                 return
 
             user_creation_data[user_id]['desc'] = text
@@ -1486,13 +1597,13 @@ def handle_inputs(message):
             preview_markup.add(
                 types.InlineKeyboardButton(text="⏱ Забронировать время по МСК", callback_data="confirm_publish"),
                 types.InlineKeyboardButton(text="🔄 Повторить прошлый пост", callback_data="repeat_last_post"),
-                types.InlineKeyboardButton(text="✏️ Редактировать", callback_data="edit_publish"),
+                types.InlineKeyboardButton(text="✏️ Редактировать", callback_data="start_create_post"),
                 types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish")
             )
 
             bot.reply_to(
                 message, 
-                f"👁 **ПРЕДПРОСМОТР ВАШЕГО ПОСТА:**\n\n{final_text}\n\n-------------------\nВсе указано верно?",
+                f"👁 **ПРЕДПРОСМОТР ВАШЕГО ПОСТА:**\n\n{final_text}\n\nВсе указано верно?",
                 reply_markup=preview_markup
             )
 
@@ -1505,7 +1616,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен с расчетом времени кулдауна платформ...")
+    print("Бот запущен с разделением слотов и обязательной регистрацией платформ...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
