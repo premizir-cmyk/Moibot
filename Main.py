@@ -987,6 +987,29 @@ def close_user_post(message):
     else:
         bot.reply_to(message, "❌ Активный пост не найден.")
 
+@bot.message_handler(commands=['platforms'])
+def platforms_shortcut_cmd(message):
+    user_id = message.from_user.id
+    if is_banned(user_id): return
+    platforms = get_admin_platforms(user_id)
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    text = "⚙️ **Управление вашими платформами:**\n\nЗдесь отображаются добавленные вами платформы. Для Яндекс.Карты/Браузер слоты идут по 1 часу, для остальных (Авито, соцсети и др.) — по 45 минут.\n\n"
+    
+    if platforms:
+        text += "📌 **Ваши зарегистрированные платформы:**\n"
+        for p in platforms:
+            p_type = "Яндекс (1ч)" if is_yandex_platform(p) else "Другое (45м)"
+            text += f"• **{p}** _({p_type})_\n"
+            markup.add(types.InlineKeyboardButton(text=f"❌ Удалить «{p}»", callback_data=f"del_plat_{p}"))
+    else:
+        text += "⚠️ У вас пока нет зарегистрированных платформ!\n"
+
+    markup.add(types.InlineKeyboardButton(text="➕ Добавить платформу", callback_data="add_platform_start"))
+    markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
+    
+    bot.reply_to(message, text, reply_markup=markup, parse_mode="Markdown")
+
 @bot.message_handler(content_types=['document'])
 def handle_restore_backup(message):
     if not is_owner(message.from_user.id): return
