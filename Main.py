@@ -1050,7 +1050,7 @@ def callback_handler(call):
         return
 
     if call.data.startswith("spamblock_"):
-        bot.answer_callback_query(call.id, "Запрос отправлен заказчику!", show_alert=True)
+        bot.answer_callback_query(call.id, "Запрос отправлен заказчиком!", show_alert=True)
         msg_id = call.data.replace("spamblock_", "")
         posts_data = load_data(POSTS_FILE)
         
