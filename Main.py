@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -234,7 +233,6 @@ def normalize_platform_name(platform_text):
     text = platform_text.strip()
     text_lower = text.lower()
     
-    # Точные совпадения для известных платформ, чтобы не ломать логику
     if any(w in text_lower for w in ['яндекс браузер', 'браузер']) and 'плюс' not in text_lower:
         return 'Яндекс Браузер'
     if any(w in text_lower for w in ['яндекс карты', 'карты', 'навигатор']) and 'плюс' not in text_lower:
@@ -250,7 +248,6 @@ def normalize_platform_name(platform_text):
     if text_lower in ['2гис', '2gis']:
         return '2ГИС'
         
-    # Для абсолютно любых новых платформ (соцсети, Яндекс Плюс и др.) оставляем оригинальный текст с красивой заглавной буквой
     return text.capitalize()
 
 def is_yandex_platform(platform_name):
@@ -400,7 +397,6 @@ def get_available_slots_keyboard(user_id, platform_name):
     markup = types.InlineKeyboardMarkup(row_width=2)
     
     if is_yandex:
-        # Яндекс (Карты/Браузер): строго по 1 часу (10:00, 11:00, 12:00...)
         if now.minute == 0 and now.second == 0:
             start_dt = now
         else:
@@ -436,7 +432,6 @@ def get_available_slots_keyboard(user_id, platform_name):
             markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=callback_data))
             slot_dt += timedelta(hours=1)
     else:
-        # Все остальные платформы (Авито, соцсети, Яндекс Плюс и др.): по 45 минут
         if 0 <= now.hour < 10:
             start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
         else:
@@ -1035,7 +1030,6 @@ def set_scheduled_photos(message):
 def callback_handler(call):
     user_id = call.from_user.id
     
-    # Всегда гасим «часики» загрузки на кнопке, чтобы интерфейс не зависал
     try:
         bot.answer_callback_query(call.id)
     except Exception:
@@ -1084,7 +1078,6 @@ def callback_handler(call):
                 print(f"Ошибка отправки уведомления: {e}")
         return
 
-    # УПРАВЛЕНИЕ И ДОБАВЛЕНИЕ ПЛАТФОРМ АДМИНА
     if call.data == "manage_platforms":
         platforms = get_admin_platforms(user_id)
         
@@ -1497,7 +1490,6 @@ def handle_inputs(message):
 
     text = message.text or message.caption or ""
 
-    # Обработка добавления новой платформы
     if user_states.get(user_id) == "waiting_for_platform_name":
         del user_states[user_id]
         platform_name = text.strip()
@@ -1515,7 +1507,6 @@ def handle_inputs(message):
         )
         return
 
-    # Распознавание времени в обычных сообщениях
     found_time = extract_time(text)
     has_target = check_target_phrases(text)
     has_socials = contains_social_media(text)
@@ -1604,7 +1595,7 @@ def handle_inputs(message):
 
 # --- ЗАПУСК ПОТОКОВ И ПОЛЛИНГА ---
 
-threading.Thred(target=auto_close_checker, daemon=True).start()
+threading.Thread(target=auto_close_checker, daemon=True).start()
 threading.Thread(target=check_expiring_subscriptions_and_cooldowns, daemon=True).start()
 threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
