@@ -24,6 +24,7 @@ bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=16)
 DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
 DB_FILE = os.path.join(DATA_DIR, 'users.json')
 COOLDOWN_FILE = os.path.join(DATA_DIR, 'cooldowns.json')
+PLATFORM_HISTORY_FILE = os.path.join(DATA_DIR, 'platform_history.json')  # История платформ для раздельного кулдауна
 NOTIFIED_FILE = os.path.join(DATA_DIR, 'notified.json')
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
 POSTS_FILE = os.path.join(DATA_DIR, 'active_posts.json')
@@ -35,8 +36,9 @@ SLOT_COUNTER_FILE = os.path.join(DATA_DIR, 'slot_counter.json')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 BACKUP_LOG_FILE = os.path.join(DATA_DIR, 'backup_log.json')
 
-COOLDOWN_TIME = 9000    # 2.5 часа кулдаун между постами (в секундах)
+COOLDOWN_TIME = 9000    # 2.5 часа общий кулдаун между постами одного юзера (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
+MIN_OTHER_POSTS_FOR_SAME_PLATFORM = 3  # Сколько чужих/других постов должно пройти перед повтором платформы
 
 # Расширенный список запрещенных скам-слов
 FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом', 'пробив', 'софт']
@@ -61,7 +63,7 @@ RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
 1. **Используйте пошаговый конструктор!** Запрещено указывать юзернеймы и ссылки в тексте.
 2. **Запрещен скам и бессмысленные задания!** 
-3. **Кулдаун:** Между постами 2 часа 30 минут.
+3. **Кулдаун:** Между постами одного автора 2.5 часа. Одинаковые платформы чередуются через каждые 3 других поста.
 4. **Обязательна подписка** на наш канал.
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
@@ -76,8 +78,8 @@ def load_data(filename):
                     return json.load(f)
             except Exception as e:
                 print(f"Ошибка чтения {filename}: {e}")
-                return [] if filename.endswith(('history.json', 'blacklist.json')) else {}
-        return [] if filename.endswith(('history.json', 'blacklist.json')) else {}
+                return [] if filename.endswith(('history.json', 'blacklist.json', 'platform_history.json')) else {}
+        return [] if filename.endswith(('history.json', 'blacklist.json', 'platform_history.json')) else {}
 
 def save_data(filename, data):
     with file_lock:
@@ -194,6 +196,58 @@ def reset_cooldown(user_id):
     if str_id in cooldowns:
         del cooldowns[str_id]
         save_data(COOLDOWN_FILE, cooldowns)
+
+def normalize_platform_name(platform_text):
+    text = platform_text.lower().strip()
+    if any(w in text for w in ['яндекс', 'yandex', 'карты', 'навигатор']):
+        return 'Яндекс Карты / Сервисы'
+    if any(w in text for w in ['авито', 'avito']):
+        return 'Авито'
+    if any(w in text for w in ['wb', 'wildberries', 'вайлдберриз']):
+        return 'Wildberries'
+    if any(w in text for w in ['озон', 'ozon']):
+        return 'Ozon'
+    if any(w in text for w in ['гугл', 'google', 'maps']):
+        return 'Google Карты'
+    if any(w in text for w in ['2гис', '2gis']):
+        return '2ГИС'
+    # Базово по первому слову/названию, если не попало в основные
+    return text.capitalize()
+
+def check_platform_cooldown(platform_name):
+    """Проверяет, прошло ли достаточное количество других постов для этой платформы"""
+    norm_name = normalize_platform_name(platform_name)
+    history = load_data(PLATFORM_HISTORY_FILE)
+    if not isinstance(history, list):
+        history = []
+    
+    # Считаем, сколько постов было опубликовано С МОМЕНТА последнего появления этой же платформы
+    count_since_last = 0
+    found = False
+    for item in reversed(history):
+        if item.get('platform') == norm_name:
+            found = True
+            break
+        count_since_last += 1
+        
+    if not found:
+        return True, 0  
+        
+    if count_since_last >= MIN_OTHER_POSTS_FOR_SAME_PLATFORM:
+        return True, 0
+    else:
+        needed = MIN_OTHER_POSTS_FOR_SAME_PLATFORM - count_since_last
+        return False, needed
+
+def register_platform_publication(platform_name):
+    norm_name = normalize_platform_name(platform_name)
+    history = load_data(PLATFORM_HISTORY_FILE)
+    if not isinstance(history, list):
+        history = []
+    history.append({"platform": norm_name, "timestamp": time.time()})
+    if len(history) > 100:
+        history = history[-100:]
+    save_data(PLATFORM_HISTORY_FILE, history)
 
 def save_to_history(user_id, username, text):
     history = load_data(HISTORY_FILE)
@@ -371,6 +425,7 @@ def scheduled_posts_checker():
 
                             consume_post_credit(user_id)
                             set_cooldown(user_id)
+                            register_platform_publication(platform)  # Фиксируем для раздельного кулдауна платформ
                             save_to_history(user_id, username, final_text)
                             
                             user_creation_data[user_id] = {
@@ -897,6 +952,20 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, "❌ Ошибка. Начните создание заново.")
             return
 
+        # Проверяем раздельный кулдаун платформ перед показом слотов
+        platform_name = user_creation_data[user_id].get('platform', '')
+        is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
+        if not is_plat_ok:
+            bot.send_message(
+                call.message.chat.id, 
+                f"⏳ **Платформа «{platform_name}» сейчас на кулдауне!**\n"
+                f"Эту площадку можно будет выставить только после того, как в канале пройдут еще **{needed_posts} поста(ов)** других платформ.\n\n"
+                "Выберите другую площадку или дождитесь публикации других заданий.",
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+
         bot.edit_message_text(
             "⏱ **Выберите время публикации по МСК (шаг 20 минут):**\n\nСлот забронируется автоматически, и пост улетит в канал точно в указанное время.",
             chat_id=call.message.chat.id,
@@ -916,6 +985,22 @@ def callback_handler(call):
         cd = get_cooldown_left(user_id)
         if cd > 0:
             bot.send_message(call.message.chat.id, f"⏳ Кулдаун еще **{format_time(cd)}**.")
+            return
+
+        if user_id not in user_creation_data or 'platform' not in user_creation_data[user_id]:
+            bot.send_message(call.message.chat.id, "⚠️ Сначала создайте текст поста через **«📝 Выставить пост»**.", reply_markup=get_back_keyboard())
+            return
+
+        # Проверка кулдауна платформы
+        platform_name = user_creation_data[user_id].get('platform', '')
+        is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
+        if not is_plat_ok:
+            bot.send_message(
+                call.message.chat.id, 
+                f"⏳ **Платформа «{platform_name}» на кулдауне!**\nНужно еще **{needed_posts} поста(ов)** других платформ.",
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
             return
 
         bot.edit_message_text(
@@ -947,7 +1032,6 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
         timestamp_key = call.data.replace("book_slot_", "")
         
-        # Если юзер зашел через кнопку "Свободное время", но у него нет сохраненного текста поста — перенаправляем на создание поста
         if user_id not in user_creation_data or 'final_text' not in user_creation_data[user_id]:
             bot.edit_message_text(
                 "⚠️ У вас не заполнен текст поста!\nСначала создайте задание через **«📝 Выставить пост»**, а затем выберите время.",
@@ -960,6 +1044,18 @@ def callback_handler(call):
 
         c_data = user_creation_data[user_id]
         
+        # Финальная проверка кулдауна платформы прямо перед бронированием
+        is_plat_ok, needed_posts = check_platform_cooldown(c_data['platform'])
+        if not is_plat_ok:
+            bot.edit_message_text(
+                f"❌ Ошибка: Платформа «{c_data['platform']}» ушла на кулдаун (нужно еще {needed_posts} поста других платформ).",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
         if not isinstance(scheduled_data, dict):
             scheduled_data = {}
@@ -1082,9 +1178,20 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, "❌ Не найден сохраненный прошлый пост. Нажмите «📝 Выставить пост».", reply_markup=get_back_keyboard())
             return
 
-        slot_num = get_next_slot_id()
         c_data = user_creation_data[user_id]
         
+        # Проверяем кулдаун платформы для повтора
+        is_plat_ok, needed_posts = check_platform_cooldown(c_data.get('platform', ''))
+        if not is_plat_ok:
+            bot.send_message(
+                call.message.chat.id, 
+                f"⏳ **Платформа «{c_data.get('platform')}» на кулдауне!**\nНужно еще **{needed_posts} поста(ов)** других платформ перед повтором.",
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+
+        slot_num = get_next_slot_id()
         platform = c_data.get('platform', '')
         payment = c_data.get('payment', '')
         desc = c_data.get('desc', '')
@@ -1231,7 +1338,20 @@ def handle_inputs(message):
                 return
 
         if step == 1:
-            user_creation_data[user_id]['platform'] = text
+            platform_name = text
+            
+            # Проверяем раздельный кулдаун платформ сразу при вводе названия площадки
+            is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
+            if not is_plat_ok:
+                bot.reply_to(
+                    message, 
+                    f"⏳ **Платформа «{platform_name}» сейчас находится на кулдауне!**\n"
+                    f"Эту площадку можно будет выставить после того, как в канале пройдут еще **{needed_posts} поста(ов)** других платформ.\n\n"
+                    "Введите другую площадку или отмените действие через `/cancel`:"
+                )
+                return
+
+            user_creation_data[user_id]['platform'] = platform_name
             user_creation_data[user_id]['step'] = 2
             bot.reply_to(message, "💵 **Шаг 2 из 3:**\nВведите сумму оплаты в рублях (например: *150* или *300 руб*):", parse_mode="Markdown")
 
@@ -1286,7 +1406,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен с исправленным ночным сон-часом, ограничением сетки до 1 часа и меню бронирования...")
+    print("Бот запущен с раздельным кулдауном по платформам (минимум 3 других поста между одинаковыми площадками)...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
