@@ -726,6 +726,8 @@ def get_main_menu_keyboard(user_id):
     
     if is_owner(user_id):
         markup.add(types.InlineKeyboardButton(text="🛠 Админ-панель", callback_data="open_admin_help"))
+        markup.add(types.InlineKeyboardButton(text="📅 Все брони по платформам", callback_data="admin_all_scheduled"))
+        markup.add(types.InlineKeyboardButton(text="📋 Все платформы юзеров", callback_data="admin_all_platforms"))
     return markup
 
 def get_back_keyboard():
@@ -745,7 +747,8 @@ def get_admin_help_text():
         "📢 `/broadcast ТЕКСТ` — Рассылка\n"
         "⚡ `/uncd ID` — Сбросить КД\n"
         "📜 `/history` — История постов\n"
-        "📦 `/backup` — Бэкап в .zip"
+        "📦 `/backup` — Бэкап в .zip\n"
+        "📋 `/allplatforms` — Просмотр платформ всех юзеров"
     )
 
 REPORT_TEXT = (
@@ -872,6 +875,36 @@ def user_info_cmd(message):
         bot.reply_to(message, text, parse_mode="Markdown")
     except:
         bot.reply_to(message, "❌ Формат: `/user ID` или `/user @username`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['allplatforms'])
+def all_platforms_cmd(message):
+    if not is_owner(message.from_user.id): return
+    data = load_data(ADMIN_PLATFORMS_FILE)
+    if not isinstance(data, dict) or not data:
+        bot.reply_to(message, "📁 Ни один пользователь еще не зарегистрировал платформы.", parse_mode="Markdown")
+        return
+
+    text = "📋 **СПИСОК ВСЕХ ПЛАТФОРМ И ЮЗЕРОВ:**\n\n"
+    for user_id, platforms in data.items():
+        if not platforms:
+            continue
+        try:
+            chat_info = bot.get_chat(int(user_id))
+            username_str = f"@{chat_info.username}" if chat_info.username else f"{chat_info.first_name} (ID: {user_id})"
+        except:
+            username_str = f"ID: {user_id}"
+
+        text += f"👤 **{username_str}**\n"
+        for p in platforms:
+            p_type = "Яндекс (1ч)" if is_yandex_platform(p) else "Другое (45м)"
+            text += f"   • `{p}` _({p_type})_\n"
+        text += "\n"
+
+    if len(text) > 4096:
+        for x in range(0, len(text), 4096):
+            bot.send_message(message.chat.id, text[x:x+4096], parse_mode="Markdown")
+    else:
+        bot.reply_to(message, text, parse_mode="Markdown")
 
 @bot.message_handler(commands=['stats'])
 def stats_cmd(message):
@@ -1078,7 +1111,44 @@ def callback_handler(call):
                 print(f"Ошибка отправки уведомления: {e}")
         return
 
-    if call.data == "admin_all_scheduled":
+    if call.data == "admin_all_platforms":
+        if not is_owner(user_id): return
+        data = load_data(ADMIN_PLATFORMS_FILE)
+        if not isinstance(data, dict) or not data:
+            bot.edit_message_text(
+                "📁 Ни один пользователь еще не зарегистрировал платформы.",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+
+        text = "📋 **СПИСОК ВСЕХ ПЛАТФОРМ И ЮЗЕРОВ:**\n\n"
+        for u_id, platforms in data.items():
+            if not platforms:
+                continue
+            try:
+                chat_info = bot.get_chat(int(u_id))
+                username_str = f"@{chat_info.username}" if chat_info.username else f"{chat_info.first_name} (ID: {u_id})"
+            except:
+                username_str = f"ID: {u_id}"
+
+            text += f"👤 **{username_str}**\n"
+            for p in platforms:
+                p_type = "Яндекс (1ч)" if is_yandex_platform(p) else "Другое (45м)"
+                text += f"   • `{p}` _({p_type})_\n"
+            text += "\n"
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton(text="⬅️ Назад в админ-панель", callback_data="open_admin_help"))
+        
+        if len(text) > 4096:
+            text = text[:4096]
+        
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+    elif call.data == "admin_all_scheduled":
         if not is_owner(user_id): return
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
         
@@ -1092,7 +1162,6 @@ def callback_handler(call):
             )
             return
 
-        # Группируем брони по платформам, чтобы показать кол-во человек и их юзы
         platforms_grouped = {}
         for ts, info in scheduled_data.items():
             p_name = info.get('platform', 'Другое')
@@ -1495,6 +1564,7 @@ def callback_handler(call):
             admin_markup = types.InlineKeyboardMarkup(row_width=1)
             admin_markup.add(
                 types.InlineKeyboardButton(text="📅 Все брони по платформам", callback_data="admin_all_scheduled"),
+                types.InlineKeyboardButton(text="📋 Все платформы юзеров", callback_data="admin_all_platforms"),
                 types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu")
             )
             bot.edit_message_text(get_admin_help_text(), chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=admin_markup, parse_mode="Markdown")
