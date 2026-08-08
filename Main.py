@@ -236,6 +236,29 @@ def check_platform_cooldown(platform_name):
         needed = MIN_OTHER_POSTS_FOR_SAME_PLATFORM - count_since_last
         return False, needed
 
+def get_next_available_slot_for_platform(platform_name):
+    """Рассчитывает ориентировочное время, когда платформа будет доступна после 3 постов."""
+    norm_name = normalize_platform_name(platform_name)
+    history = load_data(PLATFORM_HISTORY_FILE)
+    if not isinstance(history, list):
+        history = []
+    
+    count_since_last = 0
+    for item in reversed(history):
+        if item.get('platform') == norm_name:
+            break
+        count_since_last += 1
+        
+    needed_posts = max(0, MIN_OTHER_POSTS_FOR_SAME_PLATFORM - count_since_last)
+    
+    # Шаг слота 20 минут (1200 секунд), умножаем на оставшиеся посты + 1 слот
+    delay_seconds = (needed_posts + 1) * 1200 
+    available_timestamp = time.time() + delay_seconds
+    
+    tz = pytz.timezone('Europe/Moscow')
+    available_dt = datetime.fromtimestamp(available_timestamp, tz)
+    return available_dt.strftime('%d.%m в %H:%M МСК'), needed_posts
+
 def register_platform_publication(platform_name):
     norm_name = normalize_platform_name(platform_name)
     history = load_data(PLATFORM_HISTORY_FILE)
@@ -287,7 +310,7 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ (С отображением платформы на занятых кнопках) ---
+# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ ---
 def get_available_slots_keyboard(user_id):
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
@@ -324,7 +347,6 @@ def get_available_slots_keyboard(user_id):
         slot_timestamp = slot_dt.timestamp()
         
         if timestamp_key in scheduled_data:
-            # Извлечение платформы для отображения в кнопке занятого слота
             slot_info = scheduled_data[timestamp_key]
             platform_name = slot_info.get("platform", "")
             if platform_name:
@@ -347,7 +369,7 @@ def get_available_slots_keyboard(user_id):
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
     return markup
 
-# --- ФУНКЦИИ БЭКАПА С ЗАЩИТОЙ ОТ СПАМА ---
+# --- ФУНКЦИИ БЭКАПА ---
 
 def can_send_backup():
     with file_lock:
@@ -954,11 +976,13 @@ def callback_handler(call):
         platform_name = user_creation_data[user_id].get('platform', '')
         is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
         if not is_plat_ok:
+            time_str, _ = get_next_available_slot_for_platform(platform_name)
             bot.send_message(
                 call.message.chat.id, 
-                f"⏳ **Платформа «{platform_name}» сейчас на кулдауне!**\n"
-                f"Эту площадку можно будет выставить только после того, как в канале пройдут еще **{needed_posts} поста(ов)** других платформ.\n\n"
-                "Выберите другую площадку или дождитесь публикации других заданий.",
+                f"⏳ **Платформа «{platform_name}» сейчас находится на кулдауне!**\n"
+                f"Нужно, чтобы прошло еще **{needed_posts} поста(ов)** других платформ.\n\n"
+                f"💡 Ближайшее свободное время для этой платформы: **{time_str}**.\n"
+                "Выберите другое время в сетке или дождитесь окончания кулдауна.",
                 reply_markup=get_back_keyboard(),
                 parse_mode="Markdown"
             )
@@ -992,9 +1016,12 @@ def callback_handler(call):
         platform_name = user_creation_data[user_id].get('platform', '')
         is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
         if not is_plat_ok:
+            time_str, _ = get_next_available_slot_for_platform(platform_name)
             bot.send_message(
                 call.message.chat.id, 
-                f"⏳ **Платформа «{platform_name}» на кулдауне!**\nНужно еще **{needed_posts} поста(ов)** других платформ.",
+                f"⏳ **Платформа «{platform_name}» на кулдауне!**\n"
+                f"Нужно еще **{needed_posts} поста(ов)** других платформ.\n\n"
+                f"💡 Ближайшее свободное время: **{time_str}**.",
                 reply_markup=get_back_keyboard(),
                 parse_mode="Markdown"
             )
@@ -1043,8 +1070,10 @@ def callback_handler(call):
         
         is_plat_ok, needed_posts = check_platform_cooldown(c_data['platform'])
         if not is_plat_ok:
+            time_str, _ = get_next_available_slot_for_platform(c_data['platform'])
             bot.edit_message_text(
-                f"❌ Ошибка: Платформа «{c_data['platform']}» ушла на кулдаун (нужно еще {needed_posts} поста других платформ).",
+                f"❌ Ошибка: Платформа «{c_data['platform']}» на кулдауне (нужно еще {needed_posts} поста других платформ).\n\n"
+                f"💡 Занять время можно будет после: **{time_str}**.",
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
                 reply_markup=get_back_keyboard(),
@@ -1178,9 +1207,12 @@ def callback_handler(call):
         
         is_plat_ok, needed_posts = check_platform_cooldown(c_data.get('platform', ''))
         if not is_plat_ok:
+            time_str, _ = get_next_available_slot_for_platform(c_data.get('platform', ''))
             bot.send_message(
                 call.message.chat.id, 
-                f"⏳ **Платформа «{c_data.get('platform')}» на кулдауне!**\nНужно еще **{needed_posts} поста(ов)** других платформ перед повтором.",
+                f"⏳ **Платформа «{c_data.get('platform')}» на кулдауне!**\n"
+                f"Нужно еще **{needed_posts} поста(ов)** других платформ перед повтором.\n\n"
+                f"💡 Занять время можно будет после: **{time_str}**.",
                 reply_markup=get_back_keyboard(),
                 parse_mode="Markdown"
             )
@@ -1337,11 +1369,14 @@ def handle_inputs(message):
             
             is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
             if not is_plat_ok:
+                time_str, _ = get_next_available_slot_for_platform(platform_name)
                 bot.reply_to(
                     message, 
-                    f"⏳ **Платформа «{platform_name}» сейчас находится на кулдауне!**\n"
-                    f"Эту площадку можно будет выставить после того, как в канале пройдут еще **{needed_posts} поста(ов)** других платформ.\n\n"
-                    "Введите другую площадку или отмените действие через `/cancel`:"
+                    f"⏳ **Платформа «{platform_name}» сейчас на кулдауне!**\n"
+                    f"Осталось пройти **{needed_posts} поста(ов)** других платформ.\n\n"
+                    f"💡 Ориентировочно занять этот слот можно будет после: **{time_str}**.\n\n"
+                    "Введите другую площадку или отмените действие через `/cancel`:",
+                    parse_mode="Markdown"
                 )
                 return
 
@@ -1400,7 +1435,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен с раздельным кулдауном по платформам и выводом названий на кнопках слотов...")
+    print("Бот запущен с расчетом времени кулдауна платформ...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
