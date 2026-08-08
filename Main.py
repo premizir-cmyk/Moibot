@@ -24,7 +24,7 @@ bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=16)
 DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
 DB_FILE = os.path.join(DATA_DIR, 'users.json')
 COOLDOWN_FILE = os.path.join(DATA_DIR, 'cooldowns.json')
-PLATFORM_HISTORY_FILE = os.path.join(DATA_DIR, 'platform_history.json')  # История платформ для раздельного кулдауна
+PLATFORM_HISTORY_FILE = os.path.join(DATA_DIR, 'platform_history.json')  
 NOTIFIED_FILE = os.path.join(DATA_DIR, 'notified.json')
 HISTORY_FILE = os.path.join(DATA_DIR, 'history.json')
 POSTS_FILE = os.path.join(DATA_DIR, 'active_posts.json')
@@ -38,9 +38,47 @@ BACKUP_LOG_FILE = os.path.join(DATA_DIR, 'backup_log.json')
 
 COOLDOWN_TIME = 9000    # 2.5 часа общий кулдаун между постами одного юзера (в секундах)
 AUTO_CLOSE_TIME = 7200  # 2 часа до автозакрытия поста (в секундах)
-MIN_OTHER_POSTS_FOR_SAME_PLATFORM = 3  # Сколько чужих/других постов должно пройти перед повтором платформы
+MIN_OTHER_POSTS_FOR_SAME_PLATFORM = 3  
 
-# Расширенный список запрещенных скам-слов
+# --- НОВЫЕ ФИЛЬТРЫ И ПРОВЕРКИ ---
+
+# 1. Функция для точной проверки полных фраз (исключает ложные срабатывания на общие корни вроде "яндекс")
+def check_target_phrases(text: str) -> bool:
+    target_patterns = [
+        r'\bяндекс\s+браузер\b',
+        r'\bяндекс\s+карты\b'
+    ]
+    text_lower = text.lower()
+    for pattern in target_patterns:
+        if re.search(pattern, text_lower):
+            return True
+    return False
+
+# 2. Функция для выявления ссылок/упоминаний соцсетей (чтобы они корректно обрабатывались и не блокировались)
+def contains_social_media(text: str) -> bool:
+    social_patterns = [
+        r't\.me/\S+',
+        r'vk\.com/\S+',
+        r'instagram\.com/\S+',
+        r't\.ly/\S+',
+        r'bit\.ly/\S+'
+    ]
+    text_lower = text.lower()
+    for pattern in social_patterns:
+        if re.search(pattern, text_lower):
+            return True
+    return False
+
+# 3. Функция для поиска ориентировочного времени в формате ЧЧ:ММ (например, 18:40)
+def extract_time(text: str):
+    time_pattern = r'\b([0-1]?[0-9]|2[0-3]):([0-5][0-9])\b'
+    match = re.search(time_pattern, text)
+    if match:
+        return match.group(0)
+    return None
+
+
+# Расширенный список запрещенных скам-слов (соцсети исключены из стоп-листа!)
 FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом', 'пробив', 'софт']
 
 # Ключевые слова, указывающие на РЕАЛЬНОЕ задание / слот
@@ -61,7 +99,7 @@ user_states = {}
 
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
-1. **Используйте пошаговый конструктор!** Запрещено указывать юзернеймы и ссылки в тексте.
+1. **Используйте пошаговый конструктор!** Запрещено указывать юзернеймы и ссылки в тексте (кроме разрешенных соцсетей).
 2. **Запрещен скам и бессмысленные задания!** 
 3. **Кулдаун:** Между постами одного автора 2.5 часа. Одинаковые платформы чередуются через каждые 3 других поста.
 4. **Обязательна подписка** на наш канал.
@@ -199,8 +237,10 @@ def reset_cooldown(user_id):
 
 def normalize_platform_name(platform_text):
     text = platform_text.lower().strip()
-    if any(w in text for w in ['яндекс', 'yandex', 'карты', 'навигатор']):
-        return 'Яндекс Карты / Сервисы'
+    if any(w in text for w in ['яндекс браузер', 'браузер']):
+        return 'Яндекс Браузер'
+    if any(w in text for w in ['яндекс карты', 'карты', 'яндекс', 'yandex', 'навигатор']):
+        return 'Яндекс Карты'
     if any(w in text for w in ['авито', 'avito']):
         return 'Авито'
     if any(w in text for w in ['wb', 'wildberries', 'вайлдберриз']):
@@ -237,7 +277,6 @@ def check_platform_cooldown(platform_name):
         return False, needed
 
 def get_next_available_slot_for_platform(platform_name):
-    """Рассчитывает точное время, когда платформа освободится после 3 постов."""
     norm_name = normalize_platform_name(platform_name)
     history = load_data(PLATFORM_HISTORY_FILE)
     if not isinstance(history, list):
@@ -250,8 +289,6 @@ def get_next_available_slot_for_platform(platform_name):
         count_since_last += 1
         
     needed_posts = max(0, MIN_OTHER_POSTS_FOR_SAME_PLATFORM - count_since_last)
-    
-    # Шаг слота 20 минут (1200 секунд), умножаем на оставшиеся посты + 1 слот
     delay_seconds = (needed_posts + 1) * 1200 
     available_timestamp = time.time() + delay_seconds
     
@@ -938,6 +975,18 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "⛔ Вы заблокированы!", show_alert=True)
         return
 
+    # Логика бронирования времени прямо из сообщений (если бот предлагает забронировать найденное время)
+    if call.data.startswith("book_time_"):
+        selected_time = call.data.split("_")[2]
+        bot.answer_callback_query(call.id, "Бронь подтверждена!")
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"🎉 Место успешно забронировано на **{selected_time}**!",
+            parse_mode="Markdown"
+        )
+        return
+
     if call.data.startswith("spamblock_"):
         bot.answer_callback_query(call.id, "Запрос отправлен заказчику!", show_alert=True)
         msg_id = call.data.replace("spamblock_", "")
@@ -1184,7 +1233,7 @@ def callback_handler(call):
             return
 
         user_creation_data[user_id] = {'step': 1}
-        bot.send_message(call.message.chat.id, "📌 **Шаг 1 из 3:**\nВведите площадку (например: *Яндекс Карты, Авито, Пушкинская карта*):", parse_mode="Markdown")
+        bot.send_message(call.message.chat.id, "📌 **Шаг 1 из 3:**\nВведите площадку (например: *Яндекс Браузер, Яндекс Карты, Авито*):", parse_mode="Markdown")
 
     elif call.data == "repeat_last_post":
         bot.answer_callback_query(call.id)
@@ -1336,6 +1385,27 @@ def handle_inputs(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
 
+    text = message.text or message.caption or ""
+
+    # === ИНТЕГРАЦИЯ УМНОГО ПОИСКА ВРЕМЕНИ И СОЦСЕТЕЙ В ОБЩИЙ ПОТОК СООБЩЕНИЙ ===
+    found_time = extract_time(text)
+    has_target = check_target_phrases(text)
+    has_socials = contains_social_media(text)
+
+    if found_time:
+        # Если в тексте найдено время (например, 18:40), предлагаем забронировать его инлайн-кнопкой
+        keyboard = types.InlineKeyboardMarkup(row_width=1)
+        keyboard.add(types.InlineKeyboardButton(text=f"✅ Забронировать на {found_time}", callback_data=f"book_time_{found_time}"))
+        
+        resp_msg = f"⏳ Ориентировочное время: **{found_time}**."
+        if has_target:
+            resp_msg += "\n✅ Обнаружен целевой запрос (Яндекс Браузер / Яндекс Карты)."
+        if has_socials:
+            resp_msg += "\n🌐 Обнаружена ссылка на социальную сеть."
+            
+        bot.reply_to(message, resp_msg, reply_markup=keyboard, parse_mode="Markdown")
+        return
+
     if user_states.get(user_id) == "waiting_for_report":
         del user_states[user_id]
         bot.reply_to(message, "✅ **Ваша жалоба принята и отправлена администратору на рассмотрение!**", parse_mode="Markdown")
@@ -1353,9 +1423,9 @@ def handle_inputs(message):
 
     if user_id in user_creation_data:
         step = user_creation_data[user_id].get('step', 1)
-        text = message.text or message.caption or ""
 
-        if "@" in text or "t.me" in text.lower() or "http" in text.lower():
+        # Проверка на запрещенные ссылки/юзернеймы, ЕСЛИ ЭТО НЕ РАЗРЕШЕННЫЕ СОЦСЕТИ
+        if ("@" in text or "t.me" in text.lower() or "http" in text.lower()) and not contains_social_media(text):
             bot.reply_to(message, "❌ **Ошибка!** Ссылки и юзернеймы запрещены. Введите заново:")
             return
             
