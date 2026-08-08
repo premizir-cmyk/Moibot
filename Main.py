@@ -237,7 +237,7 @@ def check_platform_cooldown(platform_name):
         return False, needed
 
 def get_next_available_slot_for_platform(platform_name):
-    """Рассчитывает ориентировочное время, когда платформа будет доступна после 3 постов."""
+    """Рассчитывает точное время, когда платформа освободится после 3 постов."""
     norm_name = normalize_platform_name(platform_name)
     history = load_data(PLATFORM_HISTORY_FILE)
     if not isinstance(history, list):
