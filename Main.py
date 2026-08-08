@@ -211,17 +211,14 @@ def normalize_platform_name(platform_text):
         return 'Google Карты'
     if any(w in text for w in ['2гис', '2gis']):
         return '2ГИС'
-    # Базово по первому слову/названию, если не попало в основные
     return text.capitalize()
 
 def check_platform_cooldown(platform_name):
-    """Проверяет, прошло ли достаточное количество других постов для этой платформы"""
     norm_name = normalize_platform_name(platform_name)
     history = load_data(PLATFORM_HISTORY_FILE)
     if not isinstance(history, list):
         history = []
     
-    # Считаем, сколько постов было опубликовано С МОМЕНТА последнего появления этой же платформы
     count_since_last = 0
     found = False
     for item in reversed(history):
@@ -290,7 +287,7 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ (Строго до 1 часа вперед и сон-час 00:00 - 10:00) ---
+# --- ФУНКЦИИ ГЕНЕРАЦИИ СЛОТОВ (С отображением платформы на занятых кнопках) ---
 def get_available_slots_keyboard(user_id):
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
@@ -304,24 +301,20 @@ def get_available_slots_keyboard(user_id):
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     
-    # Сон-час: если сейчас ночь (от 00:00 до 10:00), то ближайшие доступные слоты начинаются с 10:00 утра
     if 0 <= now.hour < 10:
         start_dt = now.replace(hour=10, minute=0, second=0, microsecond=0)
     else:
-        # Округляем до ближайших 20 минут вверх
         minute = now.minute
         rem = minute % 20
         add_min = 20 - rem if rem != 0 else 20
         start_dt = now + timedelta(minutes=add_min)
         start_dt = start_dt.replace(second=0, microsecond=0)
 
-    # Максимум разрешаем бронировать строго на 1 час вперед от текущего времени (максимум 4 слота по 20 минут)
     max_end_dt = start_dt + timedelta(hours=1)
 
     slot_dt = start_dt
     slots_count = 0
     while slot_dt <= max_end_dt and slots_count < 4:
-        # Если слот выпадает на период ночного сон-часа (00:00 - 10:00)
         if 0 <= slot_dt.hour < 10:
             slot_dt += timedelta(minutes=20)
             continue
@@ -331,7 +324,13 @@ def get_available_slots_keyboard(user_id):
         slot_timestamp = slot_dt.timestamp()
         
         if timestamp_key in scheduled_data:
-            btn_text = f"❌ {slot_str} (Занято)"
+            # Извлечение платформы для отображения в кнопке занятого слота
+            slot_info = scheduled_data[timestamp_key]
+            platform_name = slot_info.get("platform", "")
+            if platform_name:
+                btn_text = f"❌ {slot_str} ({platform_name})"
+            else:
+                btn_text = f"❌ {slot_str} (Занято)"
             callback_data = "slot_busy"
         elif slot_timestamp < earliest_available_time:
             btn_text = f"⏳ {slot_str} (КД)"
@@ -425,7 +424,7 @@ def scheduled_posts_checker():
 
                             consume_post_credit(user_id)
                             set_cooldown(user_id)
-                            register_platform_publication(platform)  # Фиксируем для раздельного кулдауна платформ
+                            register_platform_publication(platform)
                             save_to_history(user_id, username, final_text)
                             
                             user_creation_data[user_id] = {
@@ -952,7 +951,6 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, "❌ Ошибка. Начните создание заново.")
             return
 
-        # Проверяем раздельный кулдаун платформ перед показом слотов
         platform_name = user_creation_data[user_id].get('platform', '')
         is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
         if not is_plat_ok:
@@ -991,7 +989,6 @@ def callback_handler(call):
             bot.send_message(call.message.chat.id, "⚠️ Сначала создайте текст поста через **«📝 Выставить пост»**.", reply_markup=get_back_keyboard())
             return
 
-        # Проверка кулдауна платформы
         platform_name = user_creation_data[user_id].get('platform', '')
         is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
         if not is_plat_ok:
@@ -1044,7 +1041,6 @@ def callback_handler(call):
 
         c_data = user_creation_data[user_id]
         
-        # Финальная проверка кулдауна платформы прямо перед бронированием
         is_plat_ok, needed_posts = check_platform_cooldown(c_data['platform'])
         if not is_plat_ok:
             bot.edit_message_text(
@@ -1180,7 +1176,6 @@ def callback_handler(call):
 
         c_data = user_creation_data[user_id]
         
-        # Проверяем кулдаун платформы для повтора
         is_plat_ok, needed_posts = check_platform_cooldown(c_data.get('platform', ''))
         if not is_plat_ok:
             bot.send_message(
@@ -1340,7 +1335,6 @@ def handle_inputs(message):
         if step == 1:
             platform_name = text
             
-            # Проверяем раздельный кулдаун платформ сразу при вводе названия площадки
             is_plat_ok, needed_posts = check_platform_cooldown(platform_name)
             if not is_plat_ok:
                 bot.reply_to(
@@ -1406,7 +1400,7 @@ threading.Thread(target=quiet_hours_channel_announcer, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен с раздельным кулдауном по платформам (минимум 3 других поста между одинаковыми площадками)...")
+    print("Бот запущен с раздельным кулдауном по платформам и выводом названий на кнопках слотов...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
