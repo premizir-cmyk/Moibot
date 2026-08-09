@@ -2,12 +2,11 @@ import os
 import re
 import json
 import time
-import pytz
 import zipfile
 import telebot
 import threading
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from telebot import types
 
 # --- ОСНОВНЫЕ НАСТРОЙКИ ПОД ТВОЙ КАНАЛ И БОТА ---
@@ -19,6 +18,9 @@ MY_USERNAME = '@premizir'
 OWNER_ID = [7605961809]
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=16)
+
+# Смещение для Москвы (UTC+3)
+MSK = timezone(timedelta(hours=3))
 
 # --- ХРАНЕНИЕ ФАЙЛОВ ---
 DATA_DIR = '/app/data' if os.path.exists('/app/data') else '.'
@@ -150,7 +152,7 @@ def save_to_history(user_id, username, text):
     if not isinstance(history, list):
         history = []
     history.append({
-        "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        "timestamp": datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
         "user_id": user_id,
         "username": username or "Без username",
         "text": text[:300]
@@ -182,8 +184,7 @@ def close_post_in_channel(message_id):
 
 # --- ГЕНЕРАЦИЯ СЛОТОВ ---
 def get_available_slots_keyboard(user_id, platform_name):
-    tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(tz)
+    now = datetime.now(MSK)
     
     scheduled_data = load_data(SCHEDULED_POSTS_FILE)
     if not isinstance(scheduled_data, dict):
@@ -329,7 +330,7 @@ def backup_scheduler():
     time.sleep(10)
     while True:
         try:
-            backup_filename = os.path.join(DATA_DIR, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+            backup_filename = os.path.join(DATA_DIR, f"backup_{datetime.now(MSK).strftime('%Y%m%d_%H%M%S')}.zip")
             with zipfile.ZipFile(backup_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(DATA_DIR):
                     for file in files:
@@ -511,7 +512,7 @@ def callback_handler(call):
         }
         save_data(SCHEDULED_POSTS_FILE, scheduled_data)
 
-        dt_formatted = datetime.fromtimestamp(float(timestamp_key), pytz.timezone('Europe/Moscow')).strftime('%H:%M МСК')
+        dt_formatted = datetime.fromtimestamp(float(timestamp_key), MSK).strftime('%H:%M МСК')
         bot.edit_message_text(
             f"✅ **Слот успешно забронирован на {dt_formatted}!**\nБот опубликует его автоматически.",
             chat_id=call.message.chat.id,
@@ -531,7 +532,7 @@ def callback_handler(call):
         markup = types.InlineKeyboardMarkup(row_width=1)
         text = "📅 **Ваши активные брони:**\n\n"
         for ts, info in sorted(user_bookings.items(), key=lambda x: float(x[0])):
-            dt_str = datetime.fromtimestamp(float(ts), pytz.timezone('Europe/Moscow')).strftime('%d.%m в %H:%M МСК')
+            dt_str = datetime.fromtimestamp(float(ts), MSK).strftime('%d.%m в %H:%M МСК')
             text += f"• #{info['slot_num']} на `{dt_str}` ({info['platform']})\n"
             markup.add(types.InlineKeyboardButton(text=f"❌ Отменить бронь #{info['slot_num']}", callback_data=f"cancel_booking_{ts}"))
         markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
@@ -542,7 +543,6 @@ def callback_handler(call):
         ts_to_cancel = call.data.replace("cancel_booking_", "")
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
         if ts_to_cancel in scheduled_data:
-            # Разрешаем отмену либо владельцу брони, либо админу
             if scheduled_data[ts_to_cancel].get("user_id") == user_id or is_owner(user_id):
                 del scheduled_data[ts_to_cancel]
                 save_data(SCHEDULED_POSTS_FILE, scheduled_data)
@@ -568,7 +568,7 @@ def callback_handler(call):
         markup = types.InlineKeyboardMarkup(row_width=1)
         text = "📅 **Все активные брони:**\n\n"
         for ts, info in sorted(scheduled_data.items(), key=lambda x: float(x[0])):
-            dt_str = datetime.fromtimestamp(float(ts), pytz.timezone('Europe/Moscow')).strftime('%d.%m в %H:%M МСК')
+            dt_str = datetime.fromtimestamp(float(ts), MSK).strftime('%d.%m в %H:%M МСК')
             text += f"• Бронь #{info['slot_num']} на `{dt_str}` ({info['platform']})\n"
             markup.add(types.InlineKeyboardButton(text=f"❌ Снять бронь #{info['slot_num']} ({dt_str})", callback_data=f"cancel_booking_{ts}"))
         markup.add(types.InlineKeyboardButton(text="⬅️ Назад в админ-панель", callback_data="open_admin_panel"))
