@@ -370,8 +370,6 @@ def get_back_keyboard():
     markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
     return markup
 
-# --- АДМИН КОМАНДЫ И ПАНЕЛЬ ---
-
 def get_admin_panel_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -379,6 +377,8 @@ def get_admin_panel_keyboard():
         types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu")
     )
     return markup
+
+# --- ВСЕ АДМИН КОМАНДЫ ИЗ СКРИНШОТА ---
 
 @bot.message_handler(commands=['add'])
 def add_user(message):
@@ -391,13 +391,28 @@ def add_user(message):
         exp_time = time.time() + (days * 86400) if days > 0 else 0
         users[target_id] = {"expire": exp_time, "posts": posts}
         save_data(DB_FILE, users)
-        bot.reply_to(message, f"✅ Доступ для ID `{target_id}` выдан!", parse_mode="Markdown")
+        bot.reply_to(message, f"✅ Доступ для ID `{target_id}` выдан на {days} дн. и {posts} постов!", parse_mode="Markdown")
         try:
             bot.send_message(int(target_id), "🎉 **Вам выдан доступ к боту!** Нажмите /start", reply_markup=get_persistent_keyboard())
         except:
             pass
     except:
         bot.reply_to(message, "Формат: `/add ID ДНИ [ПОСТЫ]`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['del'])
+def del_user(message):
+    if not is_owner(message.from_user.id): return
+    try:
+        target_id = str(message.text.split()[1])
+        users = load_data(DB_FILE)
+        if target_id in users:
+            del users[target_id]
+            save_data(DB_FILE, users)
+            bot.reply_to(message, f"🗑 Доступ у пользователя `{target_id}` успешно забран.", parse_mode="Markdown")
+        else:
+            bot.reply_to(message, f"⚠️ Пользователь `{target_id}` не найден в базе.", parse_mode="Markdown")
+    except:
+        bot.reply_to(message, "Формат: `/del ID`", parse_mode="Markdown")
 
 @bot.message_handler(commands=['ban'])
 def ban_user(message):
@@ -424,6 +439,129 @@ def unban_user(message):
         bot.reply_to(message, f"✅ Пользователь `{target_id}` разбанен.", parse_mode="Markdown")
     except:
         bot.reply_to(message, "Формат: `/unban ID`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['user'])
+def user_card(message):
+    if not is_owner(message.from_user.id): return
+    try:
+        target_id = str(message.text.split()[1])
+        users = load_data(DB_FILE)
+        b = load_data(BAN_FILE)
+        is_b = target_id in b
+        
+        if target_id in users:
+            u_data = users[target_id]
+            if isinstance(u_data, dict):
+                exp = u_data.get("expire", 0)
+                exp_str = datetime.fromtimestamp(exp, MSK).strftime('%d.%m.%Y %H:%M') if exp > 0 else "Бессрочно / Нет"
+                posts = u_data.get("posts", 0)
+            else:
+                exp_str = datetime.fromtimestamp(u_data, MSK).strftime('%d.%m.%Y %H:%M')
+                posts = 0
+            bot.reply_to(message, f"👤 **Карточка пользователя `{target_id}`:**\n• Бан: `{'Да' if is_b else 'Нет'}`\n• Подписка до: `{exp_str}`\n• Остаток постов: `{posts}`", parse_mode="Markdown")
+        else:
+            bot.reply_to(message, f"👤 Пользователь `{target_id}` не найден в базе активных подписок. Бан: `{'Да' if is_b else 'Нет'}`", parse_mode="Markdown")
+    except:
+        bot.reply_to(message, "Формат: `/user ID`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['list'])
+def list_users(message):
+    if not is_owner(message.from_user.id): return
+    users = load_data(DB_FILE)
+    if not users:
+        bot.reply_to(message, "📋 Список подписок пуст.")
+        return
+    text = "📋 **Список пользователей с доступом:**\n\n"
+    for uid, data in users.items():
+        if isinstance(data, dict):
+            exp = data.get("expire", 0)
+            exp_str = datetime.fromtimestamp(exp, MSK).strftime('%d.%m.%Y') if exp > 0 else "Без срока"
+            posts = data.get("posts", 0)
+            text += f"• `{uid}`: До `{exp_str}`, постов: `{posts}`\n"
+        else:
+            text += f"• `{uid}`\n"
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['stats'])
+def stats_cmd(message):
+    if not is_owner(message.from_user.id): return
+    users = load_data(DB_FILE)
+    banned = load_data(BAN_FILE)
+    sched = load_data(SCHEDULED_POSTS_FILE)
+    history = load_data(HISTORY_FILE)
+    
+    text = (
+        "📊 **Статистика бота:**\n\n"
+        f"• Активных пользователей в базе: `{len(users)}`\n"
+        f"• Заблокированных: `{len(banned)}`\n"
+        f"• Активных броней в сетке: `{len(sched)}`\n"
+        f"• Всего записей в истории: `{len(history)}`"
+    )
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['broadcast'])
+def broadcast_cmd(message):
+    if not is_owner(message.from_user.id): return
+    text_to_send = message.text.replace('/broadcast', '').strip()
+    if not text_to_send:
+        bot.reply_to(message, "Формат: `/broadcast ТЕКСТ`", parse_mode="Markdown")
+        return
+    
+    users = load_data(DB_FILE)
+    success = 0
+    fail = 0
+    for uid in users:
+        try:
+            bot.send_message(int(uid), f"📢 **Сообщение от администратора:**\n\n{text_to_send}", parse_mode="Markdown")
+            success += 1
+            time.sleep(0.1)
+        except:
+            fail += 1
+    bot.reply_to(message, f"📢 Рассылка завершена!\n✅ Успешно: `{success}`\n❌ Ошибок: `{fail}`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['uncd'])
+def uncd_cmd(message):
+    if not is_owner(message.from_user.id): return
+    try:
+        target_id = str(message.text.split()[1])
+        cooldowns = load_data(COOLDOWN_FILE)
+        if target_id in cooldowns:
+            del cooldowns[target_id]
+            save_data(COOLDOWN_FILE, cooldowns)
+            bot.reply_to(message, f"⚡ Кулдаун для пользователя `{target_id}` успешно сброшен!", parse_mode="Markdown")
+        else:
+            bot.reply_to(message, f"⚠️ У пользователя `{target_id}` не было активного кулдауна.", parse_mode="Markdown")
+    except:
+        bot.reply_to(message, "Формат: `/uncd ID`", parse_mode="Markdown")
+
+@bot.message_handler(commands=['history'])
+def history_cmd(message):
+    if not is_owner(message.from_user.id): return
+    history = load_data(HISTORY_FILE)
+    if not history:
+        bot.reply_to(message, "📜 История постов пуста.")
+        return
+    text = "📜 **Последние опубликованные посты:**\n\n"
+    for item in history[-10:]:
+        text += f"▪️ `{item['timestamp']}` (ID: `{item['user_id']}`)\n{item['text'][:100]}...\n\n"
+    bot.reply_to(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['backup'])
+def backup_cmd(message):
+    if not is_owner(message.from_user.id): return
+    try:
+        backup_filename = os.path.join(DATA_DIR, f"backup_{datetime.now(MSK).strftime('%Y%m%d_%H%M%S')}.zip")
+        with zipfile.ZipFile(backup_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(DATA_DIR):
+                for file in files:
+                    if file.endswith('.json'):
+                        zipf.write(os.path.join(root, file), arcname=file)
+        with open(backup_filename, 'rb') as doc:
+            bot.send_document(message.chat.id, doc, caption="📦 Бэкап баз данных", parse_mode="Markdown")
+        if os.path.exists(backup_filename):
+            os.remove(backup_filename)
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка создания бэкапа: {e}")
 
 # --- ОБРАБОТКА CALLBACK ---
 
