@@ -51,6 +51,20 @@ RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
 
+ADMIN_PANEL_TEXT = (
+    "🛠 **ПАНЕЛЬ УПРАВЛЕНИЯ ВЛАДЕЛЬЦА:**\n\n"
+    "🟢 `/add ID ДНИ [ПОСТЫ]` — Выдать доступ\n"
+    "🔴 `/del ID` — Забрать доступ\n"
+    "⛔ `/ban ID` / `/unban ID` — Бан/Разбан\n"
+    "👤 `/user ID` — Карточка пользователя\n"
+    "📋 `/list` — Список подписок\n"
+    "📊 `/stats` — Статистика\n"
+    "📢 `/broadcast ТЕКСТ` — Рассылка\n"
+    "⚡ `/uncd ID` — Сбросить КД\n"
+    "📜 `/history` — История постов\n"
+    "📦 `/backup` — Бэкап в .zip"
+)
+
 # --- БАЗЫ ДАННЫХ ---
 
 def load_data(filename):
@@ -373,12 +387,17 @@ def get_back_keyboard():
 def get_admin_panel_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton(text="📅 Управление бронями", callback_data="admin_manage_bookings"),
+        types.InlineKeyboardButton(text="📅 Все брони по платформам", callback_data="admin_manage_bookings"),
         types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu")
     )
     return markup
 
-# --- ВСЕ АДМИН КОМАНДЫ ИЗ СКРИНШОТА ---
+# --- АДМИН КОМАНДЫ ---
+
+@bot.message_handler(commands=['admin'])
+def admin_cmd(message):
+    if not is_owner(message.from_user.id): return
+    bot.reply_to(message, ADMIN_PANEL_TEXT, parse_mode="Markdown", reply_markup=get_admin_panel_keyboard())
 
 @bot.message_handler(commands=['add'])
 def add_user(message):
@@ -694,7 +713,7 @@ def callback_handler(call):
 
     elif call.data == "open_admin_panel":
         if not is_owner(user_id): return
-        bot.edit_message_text("🛠 **Админ-панель:**", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+        bot.edit_message_text(ADMIN_PANEL_TEXT, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
 
     elif call.data == "admin_manage_bookings":
         if not is_owner(user_id): return
