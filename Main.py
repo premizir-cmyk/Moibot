@@ -31,32 +31,19 @@ SCHEDULED_POSTS_FILE = os.path.join(DATA_DIR, 'scheduled_posts.json')
 BAN_FILE = os.path.join(DATA_DIR, 'blacklist.json')
 SLOT_COUNTER_FILE = os.path.join(DATA_DIR, 'slot_counter.json')
 SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
-BACKUP_LOG_FILE = os.path.join(DATA_DIR, 'backup_log.json')
 
-# НОВЫЕ ПРАВИЛА
+# ПРАВИЛА
 USER_COOLDOWN_TIME = 7200    # 2 часа кулдаун между постами одного юзера
 SLOT_STEP_MINUTES = 30       # Шаг сетки 30 минут
 MAX_AHEAD_HOURS = 2          # Максимум 2 часа вперед для брони
 
-FORBIDDEN_WORDS = ['казино', '1win', 'крипта', 'трейдинг', 'пирамида', 'darknet', 'нарко', 'взлом', 'пробив', 'софт']
-
-TASK_KEYWORDS = [
-    'отзыв', 'оценка', 'звезд', 'звёзд', 'карты', 'яндекс', 'гугл', 'авито', '2гис', 'профиль',
-    'пушкинск', 'пушка', 'билет', 'мероприятие', 'баланс',
-    'wb', 'wildberries', 'вайлдберриз', 'озон', 'ozon', 'мегамаркет', 'выкуп', 'избранное', 'товар',
-    'написать', 'оформить', 'скачать', 'подписка', 'регистрация', 'рег', 'пройти', 'прогрев',
-    'аккаунт', 'акк', 'номер', 'смс', 'приложение', 'промокод',
-    'соцсети', 'соцсетей', 'контент', 'reels', 'посты', 'сторис', 'работа', 'вакансия'
-]
-
 file_lock = threading.Lock()
 user_creation_data = {}  
-user_states = {}         
 
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
 1. **Шаг сетки:** 30 минут. Бронь доступна максимум на 2 часа вперёд.
-2. **Кулдаун платформы:** Если слот на платформе занят, следующий слот для неё блокируется с предложением выбрать время дальше (например, через 1 час).
+2. **Кулдаун платформы:** Если слот на платформе занят, следующий слот для неё блокируется с предложением выбрать время дальше.
 3. **Кулдаун пользователя:** Между своими постами необходимо выждать 2 часа.
 4. **Обязательна подписка** на наш канал.
 
@@ -82,15 +69,6 @@ def save_data(filename, data):
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception as e:
             print(f"Ошибка сохранения {filename}: {e}")
-
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            pass
-    return {"night_photo": None, "morning_photo": None}
 
 def get_next_slot_id():
     counter_data = load_data(SLOT_COUNTER_FILE)
@@ -164,13 +142,6 @@ def set_cooldown(user_id):
     cooldowns[str(user_id)] = time.time()
     save_data(COOLDOWN_FILE, cooldowns)
 
-def reset_cooldown(user_id):
-    cooldowns = load_data(COOLDOWN_FILE)
-    str_id = str(user_id)
-    if str_id in cooldowns:
-        del cooldowns[str_id]
-        save_data(COOLDOWN_FILE, cooldowns)
-
 def normalize_platform_name(platform_text):
     return platform_text.strip().capitalize()
 
@@ -209,7 +180,7 @@ def close_post_in_channel(message_id):
         except:
             return False
 
-# --- ГЕНЕРАЦИЯ СЛОТОВ ПО НОВЫМ ПРАВИЛАМ ---
+# --- ГЕНЕРАЦИЯ СЛОТОВ ---
 def get_available_slots_keyboard(user_id, platform_name):
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
@@ -222,7 +193,6 @@ def get_available_slots_keyboard(user_id, platform_name):
     cd_left = get_cooldown_left(user_id)
     earliest_available_time = now.timestamp() + cd_left
 
-    # Округление до ближайших 30 минут
     minute = now.minute
     rem = minute % SLOT_STEP_MINUTES
     add_min = SLOT_STEP_MINUTES - rem if rem != 0 else SLOT_STEP_MINUTES
@@ -232,8 +202,6 @@ def get_available_slots_keyboard(user_id, platform_name):
     markup = types.InlineKeyboardMarkup(row_width=2)
     slot_dt = start_dt
     slots_count = 0
-
-    # Максимум 2 часа вперед (генерируем слоты в пределах 2 часов)
     max_end_time = now + timedelta(hours=MAX_AHEAD_HOURS)
 
     while slot_dt <= max_end_time and slots_count < 6:
@@ -241,11 +209,9 @@ def get_available_slots_keyboard(user_id, platform_name):
         timestamp_key = str(int(slot_dt.timestamp()))
         slot_timestamp = slot_dt.timestamp()
         
-        # Проверяем, занят ли текущий слот этой же платформой или любой другой
         is_slot_busy = timestamp_key in scheduled_data
         busy_platform = scheduled_data[timestamp_key].get("platform", "") if is_slot_busy else ""
 
-        # Проверяем кулдаун платформы: если предыдущий или близкий слот занят этой же платформой
         prev_dt = slot_dt - timedelta(minutes=SLOT_STEP_MINUTES)
         prev_key = str(int(prev_dt.timestamp()))
         is_platform_cooldown = prev_key in scheduled_data and normalize_platform_name(scheduled_data[prev_key].get("platform", "")) == norm_platform
@@ -378,7 +344,7 @@ def backup_scheduler():
             pass
         time.sleep(3600)
 
-# --- КЛАВИАТУРЫ И МЕНЮ ---
+# --- КЛАВИАТУРЫ ---
 
 def get_persistent_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -395,7 +361,7 @@ def get_main_menu_keyboard(user_id):
         types.InlineKeyboardButton(text="🚨 Пожаловаться на скам", callback_data="report_scam")
     )
     if is_owner(user_id):
-        markup.add(types.InlineKeyboardButton(text="🛠 Админ-панель", callback_data="open_admin_help"))
+        markup.add(types.InlineKeyboardButton(text="🛠 Админ-панель", callback_data="open_admin_panel"))
     return markup
 
 def get_back_keyboard():
@@ -403,7 +369,15 @@ def get_back_keyboard():
     markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
     return markup
 
-# --- АДМИН КОМАНДЫ ---
+# --- АДМИН КОМАНДЫ И ПАНЕЛЬ ---
+
+def get_admin_panel_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton(text="📅 Управление бронями", callback_data="admin_manage_bookings"),
+        types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu")
+    )
+    return markup
 
 @bot.message_handler(commands=['add'])
 def add_user(message):
@@ -567,11 +541,38 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "Бронь отменена!")
         ts_to_cancel = call.data.replace("cancel_booking_", "")
         scheduled_data = load_data(SCHEDULED_POSTS_FILE)
-        if ts_to_cancel in scheduled_data and scheduled_data[ts_to_cancel].get("user_id") == user_id:
-            del scheduled_data[ts_to_cancel]
-            save_data(SCHEDULED_POSTS_FILE, scheduled_data)
-        call.data = "my_scheduled_posts"
-        callback_handler(call)
+        if ts_to_cancel in scheduled_data:
+            # Разрешаем отмену либо владельцу брони, либо админу
+            if scheduled_data[ts_to_cancel].get("user_id") == user_id or is_owner(user_id):
+                del scheduled_data[ts_to_cancel]
+                save_data(SCHEDULED_POSTS_FILE, scheduled_data)
+        
+        if is_owner(user_id) and "admin" in call.message.text.lower():
+            call.data = "admin_manage_bookings"
+            callback_handler(call)
+        else:
+            call.data = "my_scheduled_posts"
+            callback_handler(call)
+
+    elif call.data == "open_admin_panel":
+        if not is_owner(user_id): return
+        bot.edit_message_text("🛠 **Админ-панель:**", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+
+    elif call.data == "admin_manage_bookings":
+        if not is_owner(user_id): return
+        scheduled_data = load_data(SCHEDULED_POSTS_FILE)
+        if not scheduled_data:
+            bot.edit_message_text("📅 Активных броней в системе нет.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+            return
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        text = "📅 **Все активные брони:**\n\n"
+        for ts, info in sorted(scheduled_data.items(), key=lambda x: float(x[0])):
+            dt_str = datetime.fromtimestamp(float(ts), pytz.timezone('Europe/Moscow')).strftime('%d.%m в %H:%M МСК')
+            text += f"• Бронь #{info['slot_num']} на `{dt_str}` ({info['platform']})\n"
+            markup.add(types.InlineKeyboardButton(text=f"❌ Снять бронь #{info['slot_num']} ({dt_str})", callback_data=f"cancel_booking_{ts}"))
+        markup.add(types.InlineKeyboardButton(text="⬅️ Назад в админ-панель", callback_data="open_admin_panel"))
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
     elif call.data == "cancel_publish":
         if user_id in user_creation_data: del user_creation_data[user_id]
@@ -596,6 +597,15 @@ def callback_handler(call):
         else:
             prof_text = "⛔ У вас нет активного доступа."
         bot.edit_message_text(prof_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_back_keyboard(), parse_mode="Markdown")
+
+    elif call.data == "report_scam":
+        bot.edit_message_text(
+            f"🚨 Если вы столкнулись со скамом или нарушением, напишите администратору: {MY_USERNAME}",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=get_back_keyboard(),
+            parse_mode="Markdown"
+        )
 
 # --- ТЕКСТОВЫЕ ВВОДЫ ---
 
@@ -669,7 +679,7 @@ threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен с обновленной логикой (шаг 30 мин, кулдаун платформы, 2 часа вперёд)...")
+    print("Бот запущен и полностью оптимизирован...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
