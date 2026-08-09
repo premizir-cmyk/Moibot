@@ -341,8 +341,9 @@ def auto_close_checker():
         time.sleep(15)
 
 def backup_scheduler():
-    time.sleep(10)
     while True:
+        # Ждем ровно 24 часа (86400 секунд) перед каждым новым бэкапом
+        time.sleep(86400)
         try:
             backup_filename = os.path.join(DATA_DIR, f"backup_{datetime.now(MSK).strftime('%Y%m%d_%H%M%S')}.zip")
             with zipfile.ZipFile(backup_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -352,12 +353,11 @@ def backup_scheduler():
                             zipf.write(os.path.join(root, file), arcname=file)
             if OWNER_ID:
                 with open(backup_filename, 'rb') as doc:
-                    bot.send_document(OWNER_ID[0], doc, caption="📦 Авто-бэкап", parse_mode="Markdown")
+                    bot.send_document(OWNER_ID[0], doc, caption="📦 Авто-бэкап (раз в сутки)", parse_mode="Markdown")
             if os.path.exists(backup_filename):
                 os.remove(backup_filename)
         except:
             pass
-        time.sleep(3600)
 
 # --- КЛАВИАТУРЫ ---
 
