@@ -206,7 +206,17 @@ def get_available_slots_keyboard(user_id, platform_name):
 
     norm_platform = normalize_platform_name(platform_name)
     cd_left = get_cooldown_left(user_id)
-    earliest_available_time = now.timestamp() + cd_left
+    
+    # Проверяем брони самого пользователя в расписании, чтобы он не забивал всё подряд
+    user_latest_booking_ts = 0
+    for ts_str, p_info in scheduled_data.items():
+        if p_info.get("user_id") == user_id:
+            if float(ts_str) > user_latest_booking_ts:
+                user_latest_booking_ts = float(ts_str)
+    
+    # Если у юзера есть бронь, кулдаун от нее действует еще 2 часа (USER_COOLDOWN_TIME)
+    booking_cd_expire = user_latest_booking_ts + USER_COOLDOWN_TIME if user_latest_booking_ts > 0 else 0
+    earliest_available_time = max(now.timestamp() + cd_left, booking_cd_expire)
 
     minute = now.minute
     rem = minute % SLOT_STEP_MINUTES
@@ -648,7 +658,7 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "⏳ Нельзя забронировать: предыдущий слот занят этой же платформой. Выберите время дальше!", show_alert=True)
 
     elif call.data == "slot_user_cooldown":
-        bot.answer_callback_query(call.id, "⏳ Этот слот попадает под ваш персональный кулдаун!", show_alert=True)
+        bot.answer_callback_query(call.id, "⏳ Этот слот попадает под ваш персональный кулдаун (или уже имеющуюся бронь)!", show_alert=True)
 
     elif call.data.startswith("book_slot_"):
         timestamp_key = call.data.replace("book_slot_", "")
