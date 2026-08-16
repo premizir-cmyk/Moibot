@@ -57,11 +57,12 @@ ADMIN_PANEL_TEXT = (
     "🔴 `/del ID` — Забрать доступ\n"
     "⛔ `/ban ID` / `/unban ID` — Бан/Разбан\n"
     "👤 `/user ID` — Карточка пользователя\n"
-    "📋 `/list` — Список подписок\n"
+    "📋 `/list` — Список подписок (с очисткой мусора)\n"
     "📊 `/stats` — Статистика\n"
     "📢 `/broadcast ТЕКСТ` — Рассылка\n"
     "⚡ `/uncd ID` — Сбросить КД\n"
     "📜 `/history` — История постов\n"
+    "🚀 `/forcepost ПЛАТФОРМА | СУММА | ОПИСАНИЕ` — Опубликовать пост вне очереди\n"
     "📦 `/backup` — Бэкап в .zip"
 )
 
@@ -169,9 +170,9 @@ def save_to_history(user_id, username, text):
         "timestamp": datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
         "user_id": user_id,
         "username": username or "Без username",
-        "text": text[:300]
+        "text": text
     })
-    save_data(HISTORY_FILE, history[-50:])
+    save_data(HISTORY_FILE, history[-100:])
 
 def format_time(seconds):
     hours = seconds // 3600
@@ -207,14 +208,12 @@ def get_available_slots_keyboard(user_id, platform_name):
     norm_platform = normalize_platform_name(platform_name)
     cd_left = get_cooldown_left(user_id)
     
-    # Проверяем брони самого пользователя в расписании, чтобы он не забивал всё подряд
     user_latest_booking_ts = 0
     for ts_str, p_info in scheduled_data.items():
         if p_info.get("user_id") == user_id:
             if float(ts_str) > user_latest_booking_ts:
                 user_latest_booking_ts = float(ts_str)
     
-    # Если у юзера есть бронь, кулдаун от нее действует еще 2 часа (USER_COOLDOWN_TIME)
     booking_cd_expire = user_latest_booking_ts + USER_COOLDOWN_TIME if user_latest_booking_ts > 0 else 0
     earliest_available_time = max(now.timestamp() + cd_left, booking_cd_expire)
 
@@ -262,7 +261,7 @@ def get_available_slots_keyboard(user_id, platform_name):
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
     return markup
 
-# --- ФОНОВЫЕ ПОТОКИ ---
+# --- ФОНОВЫЕ ПОТОКИ (ИСПРАВЛЕНА ЗАДЕРЖКА) ---
 
 def scheduled_posts_checker():
     while True:
@@ -331,7 +330,7 @@ def scheduled_posts_checker():
                         save_data(SCHEDULED_POSTS_FILE, scheduled_data)
         except Exception as e:
             print(f"Ошибка потока расписания: {e}")
-        time.sleep(10)
+        time.sleep(1) # Уменьшена проверка до 1 секунды для мгновенной публикации без задержек
 
 def auto_close_checker():
     while True:
@@ -352,7 +351,6 @@ def auto_close_checker():
 
 def backup_scheduler():
     while True:
-        # Ждем ровно 24 часа (86400 секунд) перед каждым новым бэкапом
         time.sleep(86400)
         try:
             backup_filename = os.path.join(DATA_DIR, f"backup_{datetime.now(MSK).strftime('%Y%m%d_%H%M%S')}.zip")
@@ -493,6 +491,7 @@ def user_card(message):
     except:
         bot.reply_to(message, "Формат: `/user ID`", parse_mode="Markdown")
 
+# --- ПЕРЕРАБОТАННАЯ КОМАНДА /LIST С ОЧИСТКОЙ МУСОРА ---
 @bot.message_handler(commands=['list'])
 def list_users(message):
     if not is_owner(message.from_user.id): return
@@ -500,16 +499,41 @@ def list_users(message):
     if not users:
         bot.reply_to(message, "📋 Список подписок пуст.")
         return
-    text = "📋 **Список пользователей с доступом:**\n\n"
-    for uid, data in users.items():
+    
+    now = time.time()
+    active_users = {}
+    expired_count = 0
+    text = "📋 **Список активных подписок пользователей:**\n\n"
+    
+    for uid, data in list(users.items()):
+        is_active = False
         if isinstance(data, dict):
             exp = data.get("expire", 0)
-            exp_str = datetime.fromtimestamp(exp, MSK).strftime('%d.%m.%Y') if exp > 0 else "Без срока"
             posts = data.get("posts", 0)
-            text += f"• `{uid}`: До `{exp_str}`, постов: `{posts}`\n"
+            if (exp > 0 and now < exp) or posts > 0:
+                is_active = True
+                exp_str = datetime.fromtimestamp(exp, MSK).strftime('%d.%m.%Y') if exp > 0 else "Бессрочно"
+                text += f"• `{uid}`: До `{exp_str}`, постов: `{posts}`\n"
+                active_users[uid] = data
+            else:
+                expired_count += 1
         else:
-            text += f"• `{uid}`\n"
-    bot.reply_to(message, text, parse_mode="Markdown")
+            if now < data:
+                is_active = True
+                exp_str = datetime.fromtimestamp(data, MSK).strftime('%d.%m.%Y')
+                text += f"• `{uid}`: До `{exp_str}`\n"
+                active_users[uid] = data
+            else:
+                expired_count += 1
+
+    if expired_count > 0:
+        save_data(DB_FILE, active_users)
+        text += f"\n🧹 *Автоматически удалено просроченных записей:* `{expired_count}`"
+
+    if len(active_users) == 0:
+        bot.reply_to(message, "📋 Список активных подписок пуст (просроченные записи очищены).")
+    else:
+        bot.reply_to(message, text, parse_mode="Markdown")
 
 @bot.message_handler(commands=['stats'])
 def stats_cmd(message):
@@ -563,6 +587,7 @@ def uncd_cmd(message):
     except:
         bot.reply_to(message, "Формат: `/uncd ID`", parse_mode="Markdown")
 
+# --- ИСТОРИЯ С ПОЛНЫМ ВЫВОДОМ ПОСТОВ ДЛЯ ВЛАДЕЛЬЦА ---
 @bot.message_handler(commands=['history'])
 def history_cmd(message):
     if not is_owner(message.from_user.id): return
@@ -570,10 +595,59 @@ def history_cmd(message):
     if not history:
         bot.reply_to(message, "📜 История постов пуста.")
         return
-    text = "📜 **Последние опубликованные посты:**\n\n"
-    for item in history[-10:]:
-        text += f"▪️ `{item['timestamp']}` (ID: `{item['user_id']}`)\n{item['text'][:100]}...\n\n"
-    bot.reply_to(message, text, parse_mode="Markdown")
+    
+    # Выводим последние 5 постов полностью, чтобы владелец видел их целиком, а не обрезано
+    bot.reply_to(message, "📜 **Последние опубликованные посты (полный текст):**", parse_mode="Markdown")
+    for item in history[-5:]:
+        full_text = (
+            f"▪️ **Время:** `{item['timestamp']}`\n"
+            f"▪️ **ID юзера:** `{item['user_id']}` ({item['username']})\n\n"
+            f"{item['text']}\n"
+            "━━━━━━━━━━━━━━━━━━━"
+        )
+        bot.send_message(message.chat.id, full_text, parse_mode="Markdown")
+
+# --- КОМАНДА ПУБЛИКАЦИИ ОТ ВЛАДЕЛЬЦА ВНЕ ОЧЕРЕДИ ---
+@bot.message_handler(commands=['forcepost'])
+def force_post_cmd(message):
+    if not is_owner(message.from_user.id): return
+    try:
+        content = message.text.replace('/forcepost', '').strip()
+        parts = content.split('|')
+        if len(parts) < 3:
+            bot.reply_to(message, "❌ Формат: `/forcepost Платформа | Сумма | Описание`", parse_mode="Markdown")
+            return
+        
+        platform = parts[0].strip()
+        payment = parts[1].strip()
+        desc = parts[2].strip()
+        slot_num = get_next_slot_id()
+
+        final_text = (
+            f"🔥ГОРЯЧИЙ СЛОТ #{slot_num}\n\n"
+            f"❣️ Площадка: {platform}\n"
+            f"💵 Оплата: {payment}\n"
+            f"😀 Что нужно делать, От себя: {desc}"
+        )
+
+        auto_msg = f"Здравствуйте! Я хочу у вас взять {platform} за {payment}руб! Из канала {CHANNEL_ID}"
+        encoded_text = urllib.parse.quote(auto_msg)
+        direct_url = f"https://t.me/{message.from_user.username}?text={encoded_text}" if message.from_user.username else f"tg://user?id={message.from_user.id}"
+        clean_bot_username = BOT_USERNAME.replace('@', '')
+
+        published_msg = bot.send_message(CHANNEL_ID, final_text)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
+            types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
+            types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
+        )
+        bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=published_msg.message_id, reply_markup=markup)
+        save_to_history(message.from_user.id, message.from_user.username, final_text)
+
+        bot.reply_to(message, f"🚀 Пост #{slot_num} успешно опубликован в канал вне очереди!", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка публикации: {e}")
 
 @bot.message_handler(commands=['backup'])
 def backup_cmd(message):
@@ -681,7 +755,7 @@ def callback_handler(call):
 
         dt_formatted = datetime.fromtimestamp(float(timestamp_key), MSK).strftime('%H:%M МСК')
         bot.edit_message_text(
-            f"✅ **Слот успешно забронирован на {dt_formatted}!**\nБот опубликует его автоматически.",
+            f"✅ **Слот успешно забронирован на {dt_formatted}!**\nБот опубликует его автоматически в назначенное время.",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             reply_markup=get_back_keyboard(),
@@ -774,7 +848,7 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-# --- ТЕКСТОВЫЕ ВВОДЫ ---
+# --- ТЕКСТОВЫЕ ВВОДЫ И КОМАНДЫ С МГНОВЕННЫМ ОТКЛИКОМ ---
 
 @bot.message_handler(commands=['cancel'])
 def cancel_cmd(message):
