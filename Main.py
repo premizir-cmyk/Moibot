@@ -10,12 +10,21 @@ from datetime import datetime, timedelta, timezone
 from telebot import types
 
 # --- ОСНОВНЫЕ НАСТРОЙКИ ПОД ТВОЙ КАНАЛ И БОТА ---
-TOKEN = '8282256956:AAH-LPJFnh8HYnMHuP8-R1uQGTQ2P-_-pYk'
-CHANNEL_ID = '@otzovzaden'
+TOKEN = '8829517911:AAGnEdrqU17emXQWsiIJGX3VQQCBNGMDupE'
+
+# Список всех каналов для одновременной публикации
+CHANNELS = [
+    '-1003957627617',
+    '-1003353227659',
+    '-1003886118349'
+]
+PRIMARY_CHANNEL_DISPLAY = CHANNELS[0] # Основной канал для отображения в текстах
+
 BOT_USERNAME = '@Dengaotziv_bot'
 MY_USERNAME = '@premizir'
 
-OWNER_ID = [7605961809]
+# Два владельца бота
+OWNER_ID = [5765504991, 7605961809]
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=16)
 
@@ -47,7 +56,7 @@ RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 1. **Шаг сетки:** 30 минут. Бронь доступна максимум на 2 часа вперёд.
 2. **Кулдаун платформы:** Если слот на платформе занят, следующий слот для неё блокируется с предложением выбрать время дальше.
 3. **Кулдаун пользователя:** Между своими постами необходимо выждать 2 часа.
-4. **Обязательна подписка** на наш канал.
+4. **Обязательна подписка** на наши каналы.
 
 🚨 *За нарушение правил доступ аннулируется без возврата средств!*"""
 
@@ -106,11 +115,14 @@ def is_owner(user_id):
 def check_channel_subscription(user_id):
     if is_owner(user_id):
         return True
-    try:
-        member = bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status in ['creator', 'administrator', 'member']
-    except:
-        return True
+    for ch in CHANNELS:
+        try:
+            member = bot.get_chat_member(ch, user_id)
+            if member.status not in ['creator', 'administrator', 'member']:
+                return False
+        except:
+            pass
+    return True
 
 def is_user_active(user_id):
     if is_owner(user_id):
@@ -179,23 +191,22 @@ def format_time(seconds):
     minutes = (seconds % 3600) // 60
     return f"{hours} ч. {minutes} мин." if hours > 0 else f"{minutes} мин."
 
-def close_post_in_channel(message_id):
+def close_posts_in_channels(message_ids_dict):
     CLOSED_CARD = (
         "🔒 **[СЛОТ ЗАКРЫТ]**\n\n"
         "━━━━━⬍━━━━━\n"
         "⛔ *Набор на этот слот завершён.*\n\n"
         f"🤖 *Хотите такого же бота в свой канал? Пишите разработчику:* {MY_USERNAME}"
     )
-    try:
-        bot.edit_message_text(text=CLOSED_CARD, chat_id=CHANNEL_ID, message_id=message_id, parse_mode="Markdown", reply_markup=None)
-        return True
-    except:
+    for ch_id, msg_id in message_ids_dict.items():
         try:
-            bot.delete_message(chat_id=CHANNEL_ID, message_id=message_id)
-            bot.send_message(chat_id=CHANNEL_ID, text=CLOSED_CARD, parse_mode="Markdown")
-            return True
+            bot.edit_message_text(text=CLOSED_CARD, chat_id=ch_id, message_id=msg_id, parse_mode="Markdown", reply_markup=None)
         except:
-            return False
+            try:
+                bot.delete_message(chat_id=ch_id, message_id=msg_id)
+                bot.send_message(chat_id=ch_id, text=CLOSED_CARD, parse_mode="Markdown")
+            except:
+                pass
 
 # --- ГЕНЕРАЦИЯ СЛОТОВ ---
 def get_available_slots_keyboard(user_id, platform_name):
@@ -261,7 +272,7 @@ def get_available_slots_keyboard(user_id, platform_name):
     markup.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_publish"))
     return markup
 
-# --- ФОНОВЫЕ ПОТОКИ (ИСПРАВЛЕНА ЗАДЕРЖКА) ---
+# --- ФОНОВЫЕ ПОТОКИ ---
 
 def scheduled_posts_checker():
     while True:
@@ -279,20 +290,24 @@ def scheduled_posts_checker():
                         payment = p_info['payment']
 
                         try:
-                            auto_msg = f"Здравствуйте! Я хочу у вас взять {platform} за {payment}руб! Из канала {CHANNEL_ID}"
+                            auto_msg = f"Здравствуйте! Я хочу у вас взять {platform} за {payment}руб!"
                             encoded_text = urllib.parse.quote(auto_msg)
                             direct_url = f"https://t.me/{username}?text={encoded_text}" if username else f"tg://user?id={user_id}"
                             clean_bot_username = BOT_USERNAME.replace('@', '')
 
-                            published_msg = bot.send_message(CHANNEL_ID, final_text)
+                            published_message_ids = {}
                             
-                            markup = types.InlineKeyboardMarkup(row_width=1)
-                            markup.add(
-                                types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
-                                types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
-                                types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
-                            )
-                            bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=published_msg.message_id, reply_markup=markup)
+                            # Публикуем во все три канала
+                            for ch_id in CHANNELS:
+                                published_msg = bot.send_message(ch_id, final_text)
+                                markup = types.InlineKeyboardMarkup(row_width=1)
+                                markup.add(
+                                    types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
+                                    types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
+                                    types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
+                                )
+                                bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
+                                published_message_ids[str(ch_id)] = published_msg.message_id
 
                             consume_post_credit(user_id)
                             set_cooldown(user_id)
@@ -307,16 +322,17 @@ def scheduled_posts_checker():
 
                             confirm_msg = bot.send_message(
                                 user_id,
-                                f"🚀 **Ваш забронированный слот #{slot_num} успешно опубликован в канале!**",
+                                f"🚀 **Ваш забронированный слот #{slot_num} успешно опубликован во всех каналах!**",
                                 parse_mode="Markdown",
                                 reply_markup=confirm_markup
                             )
 
                             posts_data = load_data(POSTS_FILE)
-                            posts_data[str(published_msg.message_id)] = {
+                            posts_data[str(slot_num)] = {
                                 "user_id": user_id,
                                 "created_at": time.time(),
                                 "confirm_msg_id": confirm_msg.message_id,
+                                "message_ids": published_message_ids,
                                 "platform": platform,
                                 "payment": payment,
                                 "slot_num": f"СЛОТ-{slot_num}"
@@ -330,7 +346,7 @@ def scheduled_posts_checker():
                         save_data(SCHEDULED_POSTS_FILE, scheduled_data)
         except Exception as e:
             print(f"Ошибка потока расписания: {e}")
-        time.sleep(1) # Уменьшена проверка до 1 секунды для мгновенной публикации без задержек
+        time.sleep(1)
 
 def auto_close_checker():
     while True:
@@ -338,10 +354,10 @@ def auto_close_checker():
             posts_data = load_data(POSTS_FILE)
             now = time.time()
             changed = False
-            for p_id, p_info in list(posts_data.items()):
+            for p_key, p_info in list(posts_data.items()):
                 if now - p_info.get("created_at", 0) >= 7200:
-                    close_post_in_channel(int(p_id))
-                    del posts_data[p_id]
+                    close_posts_in_channels(p_info.get("message_ids", {}))
+                    del posts_data[p_key]
                     changed = True
             if changed:
                 save_data(POSTS_FILE, posts_data)
@@ -359,9 +375,12 @@ def backup_scheduler():
                     for file in files:
                         if file.endswith('.json'):
                             zipf.write(os.path.join(root, file), arcname=file)
-            if OWNER_ID:
-                with open(backup_filename, 'rb') as doc:
-                    bot.send_document(OWNER_ID[0], doc, caption="📦 Авто-бэкап (раз в сутки)", parse_mode="Markdown")
+            for owner in OWNER_ID:
+                try:
+                    with open(backup_filename, 'rb') as doc:
+                        bot.send_document(owner, doc, caption="📦 Авто-бэкап (раз в сутки)", parse_mode="Markdown")
+                except:
+                    pass
             if os.path.exists(backup_filename):
                 os.remove(backup_filename)
         except:
@@ -491,7 +510,6 @@ def user_card(message):
     except:
         bot.reply_to(message, "Формат: `/user ID`", parse_mode="Markdown")
 
-# --- ПЕРЕРАБОТАННАЯ КОМАНДА /LIST С ОЧИСТКОЙ МУСОРА ---
 @bot.message_handler(commands=['list'])
 def list_users(message):
     if not is_owner(message.from_user.id): return
@@ -587,7 +605,6 @@ def uncd_cmd(message):
     except:
         bot.reply_to(message, "Формат: `/uncd ID`", parse_mode="Markdown")
 
-# --- ИСТОРИЯ С ПОЛНЫМ ВЫВОДОМ ПОСТОВ ДЛЯ ВЛАДЕЛЬЦА ---
 @bot.message_handler(commands=['history'])
 def history_cmd(message):
     if not is_owner(message.from_user.id): return
@@ -596,7 +613,6 @@ def history_cmd(message):
         bot.reply_to(message, "📜 История постов пуста.")
         return
     
-    # Выводим последние 5 постов полностью, чтобы владелец видел их целиком, а не обрезано
     bot.reply_to(message, "📜 **Последние опубликованные посты (полный текст):**", parse_mode="Markdown")
     for item in history[-5:]:
         full_text = (
@@ -607,7 +623,6 @@ def history_cmd(message):
         )
         bot.send_message(message.chat.id, full_text, parse_mode="Markdown")
 
-# --- КОМАНДА ПУБЛИКАЦИИ ОТ ВЛАДЕЛЬЦА ВНЕ ОЧЕРЕДИ ---
 @bot.message_handler(commands=['forcepost'])
 def force_post_cmd(message):
     if not is_owner(message.from_user.id): return
@@ -630,22 +645,23 @@ def force_post_cmd(message):
             f"😀 Что нужно делать, От себя: {desc}"
         )
 
-        auto_msg = f"Здравствуйте! Я хочу у вас взять {platform} за {payment}руб! Из канала {CHANNEL_ID}"
+        auto_msg = f"Здравствуйте! Я хочу у вас взять {platform} за {payment}руб!"
         encoded_text = urllib.parse.quote(auto_msg)
         direct_url = f"https://t.me/{message.from_user.username}?text={encoded_text}" if message.from_user.username else f"tg://user?id={message.from_user.id}"
         clean_bot_username = BOT_USERNAME.replace('@', '')
 
-        published_msg = bot.send_message(CHANNEL_ID, final_text)
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
-            types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
-            types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
-        )
-        bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=published_msg.message_id, reply_markup=markup)
-        save_to_history(message.from_user.id, message.from_user.username, final_text)
+        for ch_id in CHANNELS:
+            published_msg = bot.send_message(ch_id, final_text)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
+                types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
+                types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
+            )
+            bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
 
-        bot.reply_to(message, f"🚀 Пост #{slot_num} успешно опубликован в канал вне очереди!", parse_mode="Markdown")
+        save_to_history(message.from_user.id, message.from_user.username, final_text)
+        bot.reply_to(message, f"🚀 Пост #{slot_num} успешно опубликован во всех 3 каналах вне очереди!", parse_mode="Markdown")
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка публикации: {e}")
 
@@ -681,7 +697,7 @@ def callback_handler(call):
 
     if call.data == "start_create_post":
         if not check_channel_subscription(user_id):
-            bot.send_message(call.message.chat.id, f"❌ Подпишитесь на канал {CHANNEL_ID}!", reply_markup=get_persistent_keyboard())
+            bot.send_message(call.message.chat.id, "❌ Подпишитесь на все наши каналы!", reply_markup=get_persistent_keyboard())
             return
         if not is_user_active(user_id):
             bot.send_message(call.message.chat.id, f"⛔ У вас нет активного доступа. Ваш ID: `{user_id}`", parse_mode="Markdown")
@@ -755,7 +771,7 @@ def callback_handler(call):
 
         dt_formatted = datetime.fromtimestamp(float(timestamp_key), MSK).strftime('%H:%M МСК')
         bot.edit_message_text(
-            f"✅ **Слот успешно забронирован на {dt_formatted}!**\nБот опубликует его автоматически в назначенное время.",
+            f"✅ **Слот успешно забронирован на {dt_formatted}!**\nБот опубликует его во все каналы автоматически в назначенное время.",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             reply_markup=get_back_keyboard(),
@@ -848,7 +864,7 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-# --- ТЕКСТОВЫЕ ВВОДЫ И КОМАНДЫ С МГНОВЕННЫМ ОТКЛИКОМ ---
+# --- ТЕКСТОВЫЕ ВВОДЫ И КОМАНДЫ ---
 
 @bot.message_handler(commands=['cancel'])
 def cancel_cmd(message):
@@ -920,7 +936,7 @@ threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен и полностью оптимизирован...")
+    print("Бот запущен и полностью оптимизирован под 3 канала...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
