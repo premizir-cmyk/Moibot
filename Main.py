@@ -23,8 +23,9 @@ PRIMARY_CHANNEL_DISPLAY = CHANNELS[0] # Основной канал для от�
 BOT_USERNAME = '@Dengaotziv_bot'
 MY_USERNAME = '@premizir'
 
-# Два владельца бота
+# Два владельца бота (первый ID — основной для жалоб)
 OWNER_ID = [5765504991, 7605961809]
+MAIN_ADMIN_ID = 5765504991
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=16)
 
@@ -50,6 +51,7 @@ MAX_AHEAD_HOURS = 2          # Максимум 2 часа вперед для �
 
 file_lock = threading.Lock()
 user_creation_data = {}  
+pending_reports = {}     # Временное хранилище жалоб/предложек для кнопки быстрой публикации
 
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
@@ -297,7 +299,6 @@ def scheduled_posts_checker():
 
                             published_message_ids = {}
                             
-                            # Публикуем во все три канала
                             for ch_id in CHANNELS:
                                 published_msg = bot.send_message(ch_id, final_text)
                                 markup = types.InlineKeyboardMarkup(row_width=1)
@@ -695,6 +696,26 @@ def callback_handler(call):
     if is_banned(user_id):
         return
 
+    # Обработка кнопки быстрой публикации жалобы/предложки администратором
+    if call.data.startswith("pub_report_"):
+        if not is_owner(user_id):
+            bot.answer_callback_query(call.id, "Эта кнопка только для владельцев!", show_alert=True)
+            return
+        
+        target_user_id = int(call.data.split("_")[2])
+        if target_user_id in pending_reports:
+            msg = pending_reports[target_user_id]
+            try:
+                # Публикуем в основной канал
+                bot.copy_message(chat_id=CHANNELS[0], from_chat_id=msg.chat.id, message_id=msg.id)
+                bot.answer_callback_query(call.id, "Сообщение успешно опубликовано в канал!")
+                bot.edit_message_reply_markup(chat_id=user_id, message_id=call.message.id, reply_markup=None)
+            except Exception as e:
+                bot.answer_callback_query(call.id, f"Ошибка публикации: {e}", show_alert=True)
+        else:
+            bot.answer_callback_query(call.id, "Сообщение не найдено или устарело.", show_alert=True)
+        return
+
     if call.data == "start_create_post":
         if not check_channel_subscription(user_id):
             bot.send_message(call.message.chat.id, "❌ Подпишитесь на все наши каналы!", reply_markup=get_persistent_keyboard())
@@ -883,15 +904,38 @@ def start_cmd(message):
     bot.reply_to(message, "👋 Добро пожаловать!", reply_markup=get_main_menu_keyboard(user_id))
     bot.send_message(message.chat.id, "Меню закреплено ниже.", reply_markup=get_persistent_keyboard())
 
-@bot.message_handler(content_types=['text'])
+@bot.message_handler(content_types=['text', 'photo', 'video', 'document'])
 def text_handler(message):
-    if message.text.startswith('/'): return
     user_id = message.from_user.id
     if is_banned(user_id): return
-    text = message.text.strip()
 
+    # Если пишет обычный пользователь (не владелец), пересылаем сообщение/жалобу на ID 5765504991 с кнопкой быстрой публикации
+    if not is_owner(user_id) and user_id not in user_creation_data:
+        username = f"@{message.from_user.username}" if message.from_user.username else "нет юзернейма"
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_publish = types.InlineKeyboardButton(text="📢 Выложить пост сразу", callback_data=f"pub_report_{user_id}")
+        markup.add(btn_publish)
+        
+        pending_reports[user_id] = message
+        
+        try:
+            bot.send_message(
+                MAIN_ADMIN_ID, 
+                f"📩 Новое сообщение / жалоба от пользователя {username} (ID: `{user_id}`):",
+                parse_mode="Markdown"
+            )
+            bot.copy_message(chat_id=MAIN_ADMIN_ID, from_chat_id=message.chat.id, message_id=message.id, reply_markup=markup)
+            bot.reply_to(message, "Ваше сообщение / жалоба отправлена администратору!")
+        except Exception as e:
+            print(f"Ошибка пересылки жалобы: {e}")
+        return
+
+    if message.text and message.text.startswith('/'): return
+    
     if user_id in user_creation_data:
         step = user_creation_data[user_id].get('step', 1)
+        text = message.text.strip() if message.text else ""
 
         if step == 1:
             user_creation_data[user_id]['platform'] = text
