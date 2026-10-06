@@ -20,7 +20,7 @@ CHANNELS = [
 ]
 PRIMARY_CHANNEL_DISPLAY = CHANNELS[0] # Основной канал для отображения в текстах
 
-BOT_USERNAME = '@Dengaotziv_bot'
+BOT_USERNAME = '@krasnovolossyaalina_bot'
 MY_USERNAME = '@premizir'
 
 # Два владельца бота (первый ID — основной для жалоб)
