@@ -52,6 +52,7 @@ MAX_AHEAD_HOURS = 2          # Максимум 2 часа вперед для �
 file_lock = threading.Lock()
 user_creation_data = {}  
 pending_reports = {}     # Временное хранилище жалоб/предложек для кнопки быстрой публикации
+active_published_slots = {} # Хранилище опубликованных постов: message_id -> {user_id, slot_num, platform, payment}
 
 RULES_TEXT = """⚠️ **ПРАВИЛА ПУБЛИКАЦИИ:**
 
@@ -170,7 +171,7 @@ def set_cooldown(user_id):
     if is_owner(user_id):
         return
     cooldowns = load_data(COOLDOWN_FILE)
-    cooldowns[str(user_id)] = time.time()
+    cooldowns[user_id] = time.time()
     save_data(COOLDOWN_FILE, cooldowns)
 
 def normalize_platform_name(platform_text):
@@ -304,11 +305,19 @@ def scheduled_posts_checker():
                                 markup = types.InlineKeyboardMarkup(row_width=1)
                                 markup.add(
                                     types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
-                                    types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
-                                    types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
+                                    types.InlineKeyboardButton(text="🚫 У меня спам-блок", url=f"https://t.me/{clean_bot_username}?start=spamblock_{user_id}"),
+                                    types.InlineKeyboardButton(text="🚨 Пожаловаться", callback_data=f"complain_{user_id}")
                                 )
                                 bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
                                 published_message_ids[str(ch_id)] = published_msg.message_id
+                                
+                                # Сохраняем привязку сообщения в канале к автору поста для спам-блока
+                                active_published_slots[str(published_msg.message_id)] = {
+                                    "author_id": user_id,
+                                    "slot_num": slot_num,
+                                    "platform": platform,
+                                    "payment": payment
+                                }
 
                             consume_post_credit(user_id)
                             set_cooldown(user_id)
@@ -656,10 +665,17 @@ def force_post_cmd(message):
             markup = types.InlineKeyboardMarkup(row_width=1)
             markup.add(
                 types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
-                types.InlineKeyboardButton(text="🚫 У меня спам-блок", callback_data=f"spamblock_{published_msg.message_id}"),
-                types.InlineKeyboardButton(text="🚨 Пожаловаться", url=f"https://t.me/{clean_bot_username}?start=report_{slot_num}")
+                types.InlineKeyboardButton(text="🚫 У меня спам-блок", url=f"https://t.me/{clean_bot_username}?start=spamblock_{message.from_user.id}"),
+                types.InlineKeyboardButton(text="🚨 Пожаловаться", callback_data=f"complain_{message.from_user.id}")
             )
             bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
+            
+            active_published_slots[str(published_msg.message_id)] = {
+                "author_id": message.from_user.id,
+                "slot_num": slot_num,
+                "platform": platform,
+                "payment": payment
+            }
 
         save_to_history(message.from_user.id, message.from_user.username, final_text)
         bot.reply_to(message, f"🚀 Пост #{slot_num} успешно опубликован во всех 3 каналах вне очереди!", parse_mode="Markdown")
@@ -696,6 +712,25 @@ def callback_handler(call):
     if is_banned(user_id):
         return
 
+    # Обработка клика по кнопке «🚨 Пожаловаться» прямо под постом в канале
+    if call.data.startswith("complain_"):
+        author_id = call.data.replace("complain_", "")
+        username = f"@{call.from_user.username}" if call.from_user.username else "нет юзернейма"
+        
+        # Отправляем жалобу главному владельцу (ID 5765504991)
+        try:
+            complaint_text = (
+                f"🚨 **ЖАЛОБА НА ПОСТ/АВТОРА!**\n\n"
+                f"• Жалующийся: {username} (ID: `{user_id}`)\n"
+                f"• Автор задания ID: `{author_id}`\n"
+                f"• Канал/Пост ID сообщения: `{call.message.message_id}`"
+            )
+            bot.send_message(MAIN_ADMIN_ID, complaint_text, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Ваша жалоба успешно отправлена администратору!", show_alert=True)
+        except Exception as e:
+            bot.answer_callback_query(call.id, f"Ошибка отправки жалобы: {e}", show_alert=True)
+        return
+
     # Обработка кнопки быстрой публикации жалобы/предложки администратором
     if call.data.startswith("pub_report_"):
         if not is_owner(user_id):
@@ -706,7 +741,6 @@ def callback_handler(call):
         if target_user_id in pending_reports:
             msg = pending_reports[target_user_id]
             try:
-                # Публикуем в основной канал
                 bot.copy_message(chat_id=CHANNELS[0], from_chat_id=msg.chat.id, message_id=msg.id)
                 bot.answer_callback_query(call.id, "Сообщение успешно опубликовано в канал!")
                 bot.edit_message_reply_markup(chat_id=user_id, message_id=call.message.id, reply_markup=None)
@@ -901,6 +935,27 @@ def handle_menu_btn(message):
 def start_cmd(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
+    
+    # Проверяем, не перешел ли пользователь по кнопке спам-блока
+    command_args = message.text.split()
+    if len(command_args) > 1 and command_args[1].startswith("spamblock_"):
+        author_id_str = command_args[1].replace("spamblock_", "")
+        try:
+            author_id = int(author_id_str)
+            user_mention = f"@{message.from_user.username}" if message.from_user.username else f"ID: `{user_id}`"
+            
+            # Отправляем уведомление автору задания (админу, который выложил пост), что у юзера спам-блок
+            spam_notification = (
+                f"⚠️ **У пользователя спам-блок!**\n\n"
+                f"• Пользователь: {user_mention} (ID: `{user_id}`)\n"
+                f"Хочет взять ваше задание, но у него не отправляется ЛС из-за спам-блока. Напишите ему первыми!"
+            )
+            bot.send_message(author_id, spam_notification, parse_mode="Markdown")
+            bot.reply_to(message, "✅ Уведомление отправлено автору задания! Скоро он напишет вам сам.", reply_markup=get_persistent_keyboard())
+        except Exception as e:
+            bot.reply_to(message, "❌ Не удалось отправить уведомление автору.", reply_markup=get_persistent_keyboard())
+        return
+
     bot.reply_to(message, "👋 Добро пожаловать!", reply_markup=get_main_menu_keyboard(user_id))
     bot.send_message(message.chat.id, "Меню закреплено ниже.", reply_markup=get_persistent_keyboard())
 
@@ -980,7 +1035,7 @@ threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен и полностью оптимизирован под 3 канала...")
+    print("Бот запущен и настроен под Ваши требования...")
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
