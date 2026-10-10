@@ -139,7 +139,6 @@ def is_user_active(user_id, channel_id=None):
     if str_id in users:
         data = users[str_id]
         if isinstance(data, dict):
-            # Проверяем привязку к каналу (если указано)
             allowed_ch = data.get("channel", "all")
             if channel_id and allowed_ch != "all" and str(allowed_ch) != str(channel_id):
                 return False
@@ -306,7 +305,6 @@ def scheduled_posts_checker():
 
                             published_message_ids = {}
                             
-                            # Проверяем разрешенные каналы
                             users_db = load_data(DB_FILE)
                             target_channels = CHANNELS
                             user_meta = users_db.get(str(user_id), {})
@@ -364,7 +362,6 @@ def scheduled_posts_checker():
         time.sleep(1)
 
 def auto_close_checker():
-    """Исправленный модуль автозакрытия постов через 2 часа"""
     while True:
         try:
             posts_data = load_data(POSTS_FILE)
@@ -373,7 +370,7 @@ def auto_close_checker():
                 changed = False
                 for p_key, p_info in list(posts_data.items()):
                     created_at = p_info.get("created_at", 0)
-                    if now - created_at >= 7200: # 2 часа (7200 секунд)
+                    if now - created_at >= 7200:
                         msg_dict = p_info.get("message_ids", {})
                         close_posts_in_channels(msg_dict)
                         del posts_data[p_key]
@@ -443,7 +440,15 @@ def get_admin_panel_keyboard():
 def get_channels_selector_keyboard(prefix):
     markup = types.InlineKeyboardMarkup(row_width=1)
     for idx, ch in enumerate(CHANNELS, 1):
-        markup.add(types.InlineKeyboardButton(text=f"📢 ТГК #{idx} ({ch})", callback_data=f"{prefix}_ch_{ch}"))
+        try:
+            chat_info = bot.get_chat(ch)
+            title = chat_info.title
+        except Exception:
+            title = f"ТГК #{idx}"
+            
+        btn_text = f"📢 {title} ({ch})"
+        markup.add(types.InlineKeyboardButton(text=btn_text, callback_data=f"{prefix}_ch_{ch}"))
+        
     markup.add(types.InlineKeyboardButton(text="🌐 Все ТГК сразу", callback_data=f"{prefix}_ch_all"))
     markup.add(types.InlineKeyboardButton(text="⬅️ Отмена", callback_data="open_admin_panel"))
     return markup
