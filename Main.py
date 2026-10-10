@@ -430,7 +430,8 @@ def get_back_keyboard():
 def get_admin_panel_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton(text="🟢 Выдать админку (доступ)", callback_data="admin_grant_access"),
+        types.InlineKeyboardButton(text="🟢 Выдать доступ (по дням)", callback_data="admin_grant_days"),
+        types.InlineKeyboardButton(text="📦 Выдать посты (по штукам)", callback_data="admin_grant_posts"),
         types.InlineKeyboardButton(text="🚀 Выложить пост вне очереди", callback_data="admin_force_post"),
         types.InlineKeyboardButton(text="📅 Все брони по платформам", callback_data="admin_manage_bookings"),
         types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu")
@@ -669,14 +670,25 @@ def callback_handler(call):
     if is_banned(user_id):
         return
 
-    # Админ Кнопка: Выдать админку -> выбор ТГК
-    if call.data == "admin_grant_access":
+    # Админ Кнопка: Выдать доступ по дням -> выбор ТГК
+    if call.data == "admin_grant_days":
         if not is_owner(user_id): return
         bot.edit_message_text(
-            "🟢 **ВЫДАЧА ДОСТУПА (АДМИНКИ):**\nВыберите ТГК, на который вы хотите выдать права, или выберите 'Все ТГК':",
+            "🟢 **ВЫДАЧА ДОСТУПА (ПО ДНЯМ):**\nВыберите ТГК, на который вы хотите выдать доступ, или 'Все ТГК':",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            reply_markup=get_channels_selector_keyboard("grant"),
+            reply_markup=get_channels_selector_keyboard("grantdays"),
+            parse_mode="Markdown"
+        )
+
+    # Админ Кнопка: Выдать посты по штукам -> выбор ТГК
+    elif call.data == "admin_grant_posts":
+        if not is_owner(user_id): return
+        bot.edit_message_text(
+            "📦 **ВЫДАЧА ПОСТОВ (ПО ШТУКАМ):**\nВыберите ТГК, на который вы хотите выдать посты, или 'Все ТГК':",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=get_channels_selector_keyboard("grantposts"),
             parse_mode="Markdown"
         )
 
@@ -691,15 +703,27 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # Обработка выбора канала для выдачи доступа
-    elif call.data.startswith("grant_ch_"):
+    # Выбран канал для выдачи ДНЕЙ -> шаг 1
+    elif call.data.startswith("grantdays_ch_"):
         if not is_owner(user_id): return
-        target_ch = call.data.replace("grant_ch_", "")
-        admin_action_data[user_id] = {'action': 'grant', 'channel': target_ch}
+        target_ch = call.data.replace("grantdays_ch_", "")
+        admin_action_data[user_id] = {'action': 'grant_days_step1', 'channel': target_ch}
         bot.edit_message_text(
             f"🟢 **Выбран канал:** `{target_ch}`\n\n"
-            "Введите данные пользователю в формате:\n`ID ДНИ [ПОСТЫ]`\n\n"
-            "Пример: `123456789 30 10`",
+            "Введите Telegram ID пользователя:",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            parse_mode="Markdown"
+        )
+
+    # Выбран канал для выдачи ПОСТОВ -> шаг 1
+    elif call.data.startswith("grantposts_ch_"):
+        if not is_owner(user_id): return
+        target_ch = call.data.replace("grantposts_ch_", "")
+        admin_action_data[user_id] = {'action': 'grant_posts_step1', 'channel': target_ch}
+        bot.edit_message_text(
+            f"📦 **Выбран канал:** `{target_ch}`\n\n"
+            "Введите Telegram ID пользователя:",
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
             parse_mode="Markdown"
@@ -889,7 +913,17 @@ def callback_handler(call):
         elif is_user_active(user_id):
             cd = get_cooldown_left(user_id)
             cd_str = format_time(cd) if cd > 0 else "Отсутствует"
-            prof_text = f"👤 **Ваш профиль:**\n• Кулдаун между постами: **{cd_str}**"
+            users = load_data(DB_FILE)
+            u_info = users.get(str(user_id), {})
+            posts_cnt = u_info.get('posts', 0) if isinstance(u_info, dict) else 0
+            exp = u_info.get('expire', 0) if isinstance(u_info, dict) else 0
+            exp_str = datetime.fromtimestamp(exp, MSK).strftime('%d.%m.%Y') if exp > 0 else "Бессрочно"
+            prof_text = (
+                f"👤 **Ваш профиль:**\n"
+                f"• Кулдаун между постами: **{cd_str}**\n"
+                f"• Доступ до: **{exp_str}**\n"
+                f"• Доступно постов: **{posts_cnt}**"
+            )
         else:
             prof_text = "⛔ У вас нет активного доступа."
         bot.edit_message_text(prof_text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=get_back_keyboard(), parse_mode="Markdown")
@@ -947,33 +981,83 @@ def text_handler(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
 
-    # Обработка диалогов с администратором (Выдача админки / Публикация поста вне очереди)
+    # Обработка пошаговых диалогов с администратором
     if is_owner(user_id) and user_id in admin_action_data:
         action_info = admin_action_data[user_id]
         act_type = action_info.get('action')
         target_ch = action_info.get('channel')
 
-        if act_type == 'grant':
+        # Выдача ДНЕЙ (Шаг 1 -> ввод ID)
+        if act_type == 'grant_days_step1':
+            target_id = message.text.strip()
+            if not target_id.isdigit():
+                bot.reply_to(message, "❌ Некорректный ID! Введите только цифры ID:")
+                return
+            admin_action_data[user_id]['target_id'] = target_id
+            admin_action_data[user_id]['action'] = 'grant_days_step2'
+            bot.reply_to(message, f"🟢 ID пользователя `{target_id}` записан.\n\nНа сколько дней выдать доступ? (введите число, например: `30`)", parse_mode="Markdown")
+            return
+
+        # Выдача ДНЕЙ (Шаг 2 -> ввод ДНЕЙ)
+        elif act_type == 'grant_days_step2':
+            days_str = message.text.strip()
+            if not days_str.isdigit():
+                bot.reply_to(message, "❌ Введите только число дней:")
+                return
+            days = int(days_str)
+            target_id = action_info['target_id']
+            
+            users = load_data(DB_FILE)
+            exp_time = time.time() + (days * 86400) if days > 0 else 0
+            existing_posts = users.get(target_id, {}).get("posts", 0) if isinstance(users.get(target_id), dict) else 0
+            users[target_id] = {"expire": exp_time, "posts": existing_posts, "channel": target_ch}
+            save_data(DB_FILE, users)
+
+            ch_label = "Все ТГК" if target_ch == "all" else f"ТГК {target_ch}"
+            bot.reply_to(message, f"✅ Доступ для ID `{target_id}` успешно выдан на {days} дней в {ch_label}!", parse_mode="Markdown")
             try:
-                args = message.text.split()
-                target_id, days = str(args[1]), int(args[2])
-                posts = int(args[3]) if len(args) > 3 else 0
-                users = load_data(DB_FILE)
-                exp_time = time.time() + (days * 86400) if days > 0 else 0
-                users[target_id] = {"expire": exp_time, "posts": posts, "channel": target_ch}
-                save_data(DB_FILE, users)
-                
-                ch_label = "Все ТГК" if target_ch == "all" else f"ТГК {target_ch}"
-                bot.reply_to(message, f"✅ Доступ для ID `{target_id}` выдан на {days} дн. и {posts} постов в {ch_label}!", parse_mode="Markdown")
-                try:
-                    bot.send_message(int(target_id), "🎉 **Вам выдан доступ к боту!** Нажмите /start", reply_markup=get_persistent_keyboard())
-                except:
-                    pass
-            except Exception as e:
-                bot.reply_to(message, f"❌ Ошибка! Формат ввода: `ID ДНИ [ПОСТЫ]`", parse_mode="Markdown")
+                bot.send_message(int(target_id), f"🎉 **Вам выдан доступ к боту на {days} дней!** Нажмите /start", reply_markup=get_persistent_keyboard())
+            except:
+                pass
             del admin_action_data[user_id]
             return
 
+        # Выдача ПОСТОВ (Шаг 1 -> ввод ID)
+        elif act_type == 'grant_posts_step1':
+            target_id = message.text.strip()
+            if not target_id.isdigit():
+                bot.reply_to(message, "❌ Некорректный ID! Введите только цифры ID:")
+                return
+            admin_action_data[user_id]['target_id'] = target_id
+            admin_action_data[user_id]['action'] = 'grant_posts_step2'
+            bot.reply_to(message, f"📦 ID пользователя `{target_id}` записан.\n\nСколько постов выдать? (введите число, например: `4`)", parse_mode="Markdown")
+            return
+
+        # Выдача ПОСТОВ (Шаг 2 -> ввод ПОСТОВ)
+        elif act_type == 'grant_posts_step2':
+            posts_str = message.text.strip()
+            if not posts_str.isdigit():
+                bot.reply_to(message, "❌ Введите только число постов:")
+                return
+            posts = int(posts_str)
+            target_id = action_info['target_id']
+            
+            users = load_data(DB_FILE)
+            existing_exp = users.get(target_id, {}).get("expire", 0) if isinstance(users.get(target_id), dict) else 0
+            curr_posts = users.get(target_id, {}).get("posts", 0) if isinstance(users.get(target_id), dict) else 0
+            users[target_id] = {"expire": existing_exp, "posts": curr_posts + posts, "channel": target_ch}
+            save_data(DB_FILE, users)
+
+            ch_label = "Все ТГК" if target_ch == "all" else f"ТГК {target_ch}"
+            bot.reply_to(message, f"✅ Пользователю `{target_id}` успешно начислено +{posts} постов в {ch_label}! Всего доступно: {curr_posts + posts}", parse_mode="Markdown")
+            try:
+                bot.send_message(int(target_id), f"🎉 **Вам начислено {posts} постов для публикации!** Нажмите /start", reply_markup=get_persistent_keyboard())
+            except:
+                pass
+            del admin_action_data[user_id]
+            return
+
+        # Публикация вне очереди
         elif act_type == 'forcepost':
             try:
                 content = message.text.strip()
