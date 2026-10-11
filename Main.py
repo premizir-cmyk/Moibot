@@ -24,9 +24,9 @@ PRIMARY_CHANNEL_DISPLAY = CHANNELS[0]
 BOT_USERNAME = '@krasnovolossyaalina_bot'
 MY_USERNAME = '@premizir'
 
-# Владельцы бота (первый ID — основной)
+# Владельцы бота (первый ID — главный владелец)
 OWNER_ID = [5765504991, 7605961809]
-MAIN_ADMIN_ID = 5765504991
+MAIN_ADMIN_ID = OWNER_ID[0]  # Главный владелец (5765504991)
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=16)
 
@@ -52,7 +52,7 @@ MAX_AHEAD_HOURS = 2          # Максимум 2 часа вперед для �
 
 file_lock = threading.Lock()
 user_creation_data = {}  
-admin_action_data = {}     # Данные для диалогов управления в админке
+admin_action_data = {}     
 pending_reports = {}     
 active_published_slots = {}
 
@@ -89,7 +89,7 @@ def load_data(filename):
                 with open(filename, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except Exception as e:
-                print(f"Ошибка чтения {filename}: {e}")
+                print(f"[LOG] Ошибка чтения {filename}: {e}", flush=True)
                 return [] if filename.endswith(('history.json', 'blacklist.json', 'platform_history.json')) else {}
         return [] if filename.endswith(('history.json', 'blacklist.json', 'platform_history.json')) else {}
 
@@ -99,7 +99,7 @@ def save_data(filename, data):
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Ошибка сохранения {filename}: {e}")
+            print(f"[LOG] Ошибка сохранения {filename}: {e}", flush=True)
 
 def get_next_slot_id():
     counter_data = load_data(SLOT_COUNTER_FILE)
@@ -208,13 +208,25 @@ def close_posts_in_channels(message_ids_dict):
     )
     for ch_id, msg_id in message_ids_dict.items():
         try:
-            bot.edit_message_text(text=CLOSED_CARD, chat_id=ch_id, message_id=int(msg_id), parse_mode="Markdown", reply_markup=None)
-        except Exception:
+            channel_id = int(ch_id)
+            message_id = int(msg_id)
+            
+            bot.edit_message_text(
+                text=CLOSED_CARD, 
+                chat_id=channel_id, 
+                message_id=message_id, 
+                parse_mode="Markdown", 
+                reply_markup=None
+            )
+            print(f"[LOG] ✅ Пост {message_id} в канале {channel_id} успешно закрыт.", flush=True)
+        except Exception as e:
+            print(f"[LOG] ❌ Не удалось отредактировать пост {msg_id} в {ch_id}: {e}", flush=True)
             try:
-                bot.delete_message(chat_id=ch_id, message_id=int(msg_id))
-                bot.send_message(chat_id=ch_id, text=CLOSED_CARD, parse_mode="Markdown")
-            except Exception:
-                pass
+                bot.delete_message(chat_id=int(ch_id), message_id=int(msg_id))
+                bot.send_message(chat_id=int(ch_id), text=CLOSED_CARD, parse_mode="Markdown")
+                print(f"[LOG] ✅ Пост {msg_id} пересоздан как закрытый.", flush=True)
+            except Exception as e2:
+                print(f"[LOG] 🚨 Критическая ошибка закрытия в {ch_id}: {e2}", flush=True)
 
 # --- ГЕНЕРАЦИЯ СЛОТОВ ---
 def get_available_slots_keyboard(user_id, platform_name):
@@ -305,11 +317,14 @@ def scheduled_posts_checker():
 
                             published_message_ids = {}
                             
-                            users_db = load_data(DB_FILE)
-                            target_channels = CHANNELS
-                            user_meta = users_db.get(str(user_id), {})
-                            if isinstance(user_meta, dict) and user_meta.get("channel") and user_meta.get("channel") != "all":
-                                target_channels = [user_meta["channel"]]
+                            if is_owner(user_id):
+                                target_channels = CHANNELS
+                            else:
+                                users_db = load_data(DB_FILE)
+                                target_channels = CHANNELS
+                                user_meta = users_db.get(str(user_id), {})
+                                if isinstance(user_meta, dict) and user_meta.get("channel") and user_meta.get("channel") != "all":
+                                    target_channels = [user_meta["channel"]]
 
                             for ch_id in target_channels:
                                 published_msg = bot.send_message(ch_id, final_text)
@@ -351,34 +366,38 @@ def scheduled_posts_checker():
                                 "slot_num": f"СЛОТ-{slot_num}"
                             }
                             save_data(POSTS_FILE, posts_data)
+                            print(f"[LOG] Пост #{slot_num} опубликован и добавлен в active_posts.json для автозакрытия.", flush=True)
 
                         except Exception as e:
-                            print(f"Ошибка автоотправки: {e}")
+                            print(f"[LOG] Ошибка автоотправки: {e}", flush=True)
 
                         del scheduled_data[ts_str]
                         save_data(SCHEDULED_POSTS_FILE, scheduled_data)
         except Exception as e:
-            print(f"Ошибка потока расписания: {e}")
+            print(f"[LOG] Ошибка потока расписания: {e}", flush=True)
         time.sleep(1)
 
 def auto_close_checker():
+    print("[LOG] 🔄 Поток автозакрытия постов запущен!", flush=True)
     while True:
         try:
             posts_data = load_data(POSTS_FILE)
-            if isinstance(posts_data, dict):
+            if isinstance(posts_data, dict) and posts_data:
                 now = time.time()
                 changed = False
                 for p_key, p_info in list(posts_data.items()):
                     created_at = p_info.get("created_at", 0)
-                    if now - created_at >= 7200:
+                    if now - created_at >= 7200: # 2 часа
                         msg_dict = p_info.get("message_ids", {})
-                        close_posts_in_channels(msg_dict)
+                        if msg_dict:
+                            print(f"[LOG] Время вышло (2 часа) для поста {p_key}. Закрываем...", flush=True)
+                            close_posts_in_channels(msg_dict)
                         del posts_data[p_key]
                         changed = True
                 if changed:
                     save_data(POSTS_FILE, posts_data)
         except Exception as e:
-            print(f"Ошибка автозакрытия постов: {e}")
+            print(f"[LOG] Ошибка в фоновом цикле автозакрытия: {e}", flush=True)
         time.sleep(15)
 
 def backup_scheduler():
@@ -413,6 +432,7 @@ def get_main_menu_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(text="📝 Выставить пост", callback_data="start_create_post"),
+        types.InlineKeyboardButton(text="❌ Закрыть мой пост", callback_data="my_active_posts"),
         types.InlineKeyboardButton(text="📖 Правила", callback_data="show_rules"),
         types.InlineKeyboardButton(text="⏳ Мой профиль / КД", callback_data="my_profile"),
         types.InlineKeyboardButton(text="📅 Мои брони", callback_data="my_scheduled_posts"),
@@ -670,7 +690,6 @@ def callback_handler(call):
     if is_banned(user_id):
         return
 
-    # Админ Кнопка: Выдать доступ по дням -> выбор ТГК
     if call.data == "admin_grant_days":
         if not is_owner(user_id): return
         bot.edit_message_text(
@@ -681,7 +700,6 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # Админ Кнопка: Выдать посты по штукам -> выбор ТГК
     elif call.data == "admin_grant_posts":
         if not is_owner(user_id): return
         bot.edit_message_text(
@@ -692,7 +710,6 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # Админ Кнопка: Выложить пост -> выбор ТГК
     elif call.data == "admin_force_post":
         if not is_owner(user_id): return
         bot.edit_message_text(
@@ -703,7 +720,6 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # Выбран канал для выдачи ДНЕЙ -> шаг 1
     elif call.data.startswith("grantdays_ch_"):
         if not is_owner(user_id): return
         target_ch = call.data.replace("grantdays_ch_", "")
@@ -716,7 +732,6 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # Выбран канал для выдачи ПОСТОВ -> шаг 1
     elif call.data.startswith("grantposts_ch_"):
         if not is_owner(user_id): return
         target_ch = call.data.replace("grantposts_ch_", "")
@@ -729,7 +744,6 @@ def callback_handler(call):
             parse_mode="Markdown"
         )
 
-    # Обработка выбора канала для публикации поста
     elif call.data.startswith("forcepost_ch_"):
         if not is_owner(user_id): return
         target_ch = call.data.replace("forcepost_ch_", "")
@@ -742,6 +756,54 @@ def callback_handler(call):
             message_id=call.message.message_id,
             parse_mode="Markdown"
         )
+
+    elif call.data == "my_active_posts":
+        posts_data = load_data(POSTS_FILE)
+        my_posts = {}
+        for p_key, p_info in posts_data.items():
+            if p_info.get("user_id") == user_id or is_owner(user_id):
+                my_posts[p_key] = p_info
+
+        if not my_posts:
+            bot.edit_message_text(
+                "❌ **У вас нет активных опубликованных постов в каналах.**",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        text = "📌 **Ваши активные посты в каналах:**\n\nНажмите на кнопку ниже, чтобы досрочно закрыть нужный слот:\n\n"
+        for p_key, p_info in my_posts.items():
+            slot_name = p_info.get("slot_num", f"СЛОТ #{p_key}")
+            platform = p_info.get("platform", "Задание")
+            text += f"• **{slot_name}** ({platform})\n"
+            markup.add(types.InlineKeyboardButton(text=f"🔒 Закрыть {slot_name} ({platform})", callback_data=f"close_published_slot_{p_key}"))
+        
+        markup.add(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="main_menu"))
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+    elif call.data.startswith("close_published_slot_"):
+        slot_key = call.data.replace("close_published_slot_", "")
+        posts_data = load_data(POSTS_FILE)
+        
+        if slot_key in posts_data:
+            p_info = posts_data[slot_key]
+            if p_info.get("user_id") == user_id or is_owner(user_id):
+                msg_dict = p_info.get("message_ids", {})
+                close_posts_in_channels(msg_dict)
+                del posts_data[slot_key]
+                save_data(POSTS_FILE, posts_data)
+                bot.answer_callback_query(call.id, "✅ Слот успешно закрыт досрочно!", show_alert=True)
+            else:
+                bot.answer_callback_query(call.id, "⛔ Вы можете закрыть только свой пост!", show_alert=True)
+        else:
+            bot.answer_callback_query(call.id, "⚠️ Этот пост уже закрыт или не найден.", show_alert=True)
+        
+        call.data = "my_active_posts"
+        callback_handler(call)
 
     elif call.data.startswith("complain_"):
         author_id = call.data.replace("complain_", "")
@@ -981,13 +1043,11 @@ def text_handler(message):
     user_id = message.from_user.id
     if is_banned(user_id): return
 
-    # Обработка пошаговых диалогов с администратором
     if is_owner(user_id) and user_id in admin_action_data:
         action_info = admin_action_data[user_id]
         act_type = action_info.get('action')
         target_ch = action_info.get('channel')
 
-        # Выдача ДНЕЙ (Шаг 1 -> ввод ID)
         if act_type == 'grant_days_step1':
             target_id = message.text.strip()
             if not target_id.isdigit():
@@ -998,7 +1058,6 @@ def text_handler(message):
             bot.reply_to(message, f"🟢 ID пользователя `{target_id}` записан.\n\nНа сколько дней выдать доступ? (введите число, например: `30`)", parse_mode="Markdown")
             return
 
-        # Выдача ДНЕЙ (Шаг 2 -> ввод ДНЕЙ)
         elif act_type == 'grant_days_step2':
             days_str = message.text.strip()
             if not days_str.isdigit():
@@ -1022,7 +1081,6 @@ def text_handler(message):
             del admin_action_data[user_id]
             return
 
-        # Выдача ПОСТОВ (Шаг 1 -> ввод ID)
         elif act_type == 'grant_posts_step1':
             target_id = message.text.strip()
             if not target_id.isdigit():
@@ -1033,7 +1091,6 @@ def text_handler(message):
             bot.reply_to(message, f"📦 ID пользователя `{target_id}` записан.\n\nСколько постов выдать? (введите число, например: `4`)", parse_mode="Markdown")
             return
 
-        # Выдача ПОСТОВ (Шаг 2 -> ввод ПОСТОВ)
         elif act_type == 'grant_posts_step2':
             posts_str = message.text.strip()
             if not posts_str.isdigit():
@@ -1057,7 +1114,6 @@ def text_handler(message):
             del admin_action_data[user_id]
             return
 
-        # Публикация вне очереди
         elif act_type == 'forcepost':
             try:
                 content = message.text.strip()
@@ -1118,7 +1174,6 @@ def text_handler(message):
 
     if message.text and message.text.startswith('/'): return
     
-    # Режим создания поста пользователем
     if user_id in user_creation_data:
         step = user_creation_data[user_id].get('step', 1)
         text = message.text.strip() if message.text else ""
@@ -1166,10 +1221,10 @@ threading.Thread(target=backup_scheduler, daemon=True).start()
 threading.Thread(target=scheduled_posts_checker, daemon=True).start()
 
 if __name__ == '__main__':
-    print("Бот запущен и работает с 4 каналами...")
+    print("🚀 Бот запущен и работает с 4 каналами...", flush=True)
     while True:
         try:
             bot.polling(none_stop=True, timeout=30, long_polling_timeout=30, skip_pending=True)
         except Exception as e:
-            print(f"Сбой: {e}. Переподключение...")
+            print(f"❌ Сбой: {e}. Переподключение...", flush=True)
             time.sleep(5)
