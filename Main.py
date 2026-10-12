@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -317,25 +318,27 @@ def scheduled_posts_checker():
 
                             published_message_ids = {}
                             
-                            if is_owner(user_id):
-                                target_channels = CHANNELS
-                            else:
-                                users_db = load_data(DB_FILE)
-                                target_channels = CHANNELS
+                            users_db = load_data(DB_FILE)
+                            target_channels = CHANNELS
+                            
+                            if not is_owner(user_id):
                                 user_meta = users_db.get(str(user_id), {})
                                 if isinstance(user_meta, dict) and user_meta.get("channel") and user_meta.get("channel") != "all":
                                     target_channels = [user_meta["channel"]]
 
                             for ch_id in target_channels:
-                                published_msg = bot.send_message(ch_id, final_text)
-                                markup = types.InlineKeyboardMarkup(row_width=1)
-                                markup.add(
-                                    types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
-                                    types.InlineKeyboardButton(text="🚫 У меня спам-блок", url=f"https://t.me/{clean_bot_username}?start=spamblock_{user_id}"),
-                                    types.InlineKeyboardButton(text="🚨 Пожаловаться", callback_data=f"complain_{user_id}")
-                                )
-                                bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
-                                published_message_ids[str(ch_id)] = published_msg.message_id
+                                try:
+                                    published_msg = bot.send_message(ch_id, final_text)
+                                    markup = types.InlineKeyboardMarkup(row_width=1)
+                                    markup.add(
+                                        types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
+                                        types.InlineKeyboardButton(text="🚫 У меня спам-блок", url=f"https://t.me/{clean_bot_username}?start=spamblock_{user_id}"),
+                                        types.InlineKeyboardButton(text="🚨 Пожаловаться", callback_data=f"complain_{user_id}")
+                                    )
+                                    bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
+                                    published_message_ids[str(ch_id)] = published_msg.message_id
+                                except Exception as err_ch:
+                                    print(f"[LOG] Ошибка отправки в канал {ch_id}: {err_ch}", flush=True)
 
                             consume_post_credit(user_id)
                             set_cooldown(user_id)
@@ -1143,15 +1146,18 @@ def text_handler(message):
                 published_message_ids = {}
 
                 for ch_id in target_channels:
-                    published_msg = bot.send_message(ch_id, final_text)
-                    markup = types.InlineKeyboardMarkup(row_width=1)
-                    markup.add(
-                        types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
-                        types.InlineKeyboardButton(text="🚫 У меня спам-блок", url=f"https://t.me/{clean_bot_username}?start=spamblock_{message.from_user.id}"),
-                        types.InlineKeyboardButton(text="🚨 Пожаловаться", callback_data=f"complain_{message.from_user.id}")
-                    )
-                    bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
-                    published_message_ids[str(ch_id)] = published_msg.message_id
+                    try:
+                        published_msg = bot.send_message(ch_id, final_text)
+                        markup = types.InlineKeyboardMarkup(row_width=1)
+                        markup.add(
+                            types.InlineKeyboardButton(text="Перейти к выполнению 💬", url=direct_url),
+                            types.InlineKeyboardButton(text="🚫 У меня спам-блок", url=f"https://t.me/{clean_bot_username}?start=spamblock_{message.from_user.id}"),
+                            types.InlineKeyboardButton(text="🚨 Пожаловаться", callback_data=f"complain_{message.from_user.id}")
+                        )
+                        bot.edit_message_reply_markup(chat_id=ch_id, message_id=published_msg.message_id, reply_markup=markup)
+                        published_message_ids[str(ch_id)] = published_msg.message_id
+                    except Exception as err_ch:
+                        print(f"[LOG] Ошибка принудительной отправки в канал {ch_id}: {err_ch}", flush=True)
 
                 posts_data = load_data(POSTS_FILE)
                 if not isinstance(posts_data, dict): posts_data = {}
